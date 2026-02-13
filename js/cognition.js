@@ -1008,7 +1008,7 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
     if (listener.sim) {
       const ls = listener.sim;
       const lFeelings = [];
-      if (ls.needs.hunger > 0.7) lFeelings.push('looks hungry');
+      if (ls.needs.hunger > 0.88) lFeelings.push('looks hungry');
       if (ls.needs.rest > 0.7) lFeelings.push('looks tired');
       if (ls.status.happiness < 30) lFeelings.push('seems unhappy');
       else if (ls.status.happiness > 75) lFeelings.push('seems cheerful');
@@ -1040,10 +1040,14 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
       ? `What ${speaker.name} knows or has experienced recently:\n${memoriesAboutListener.map(m => '- ' + m).join('\n')}`
       : '';
 
-    // ★ PRESENT-TENSE CONTEXT: what the speaker just saw, their recent observations
+    // ★ PRESENT-TENSE CONTEXT: what the speaker just saw, their recent observations (exclude hunger/rest alerts so conversation isn't always about food)
     let recentContext = '';
     if (speaker.cognition) {
-      const recentObs = speaker.cognition.memory.getByType('observation', 3);
+      const rawObs = speaker.cognition.memory.getByType('observation', 5);
+      const recentObs = rawObs.filter(o => {
+        const d = (o.description || '').toLowerCase();
+        return !d.includes('really hungry') && !d.includes('find food soon') && !d.includes('need to rest') && !d.includes('exhausted');
+      }).slice(0, 3);
       if (recentObs.length > 0) {
         recentContext = `What ${speaker.name} has noticed recently:\n${recentObs.map(o => '- ' + o.description).join('\n')}`;
       }
@@ -1071,7 +1075,7 @@ ${isInitiator
 Rules:
 - 1-2 sentences only. Sound like a REAL person, not an AI.
 - Use contractions, fragments, casual speech. No "Greetings" or "How wonderful".
-- Your response MUST be shaped by your personality traits, current needs, and emotional state. A hungry person mentions food. A lonely person is warmer. A rivalrous person is prickly.
+- Your response MUST be shaped by your personality traits and emotional state. A lonely person is warmer. A rivalrous person is prickly. If you're hungry you might mention it in passing, but do NOT make every conversation about food—talk about work, gossip, plans, relationships, events, opinions.
 - Consider your RELATIONSHIP numbers: high trust means openness, high rivalry means tension, high attraction means flirting, low familiarity means small talk.
 - Talk about what's on your mind RIGHT NOW: your work, what you just saw, how you're feeling, your plans, your worries, your opinions.
 - Reference previous conversations with this person if relevant — continuity matters.

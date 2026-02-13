@@ -280,8 +280,8 @@ export function simulationTick(agents, worldState, gameTime) {
     const s = agent.sim;
     const traits = s.traits;
 
-    // 1. NEEDS DECAY (skip frozen fields)
-    if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.003);
+    // 1. NEEDS DECAY (skip frozen fields) — hunger slower so conversations aren't always about food
+    if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.001);
     if (!isFrozen(s, 'needs.rest'))    s.needs.rest    = clamp01(s.needs.rest + 0.002);
     if (!isFrozen(s, 'needs.social'))  s.needs.social  = clamp01(s.needs.social + (traits.introversion > 0.6 ? 0.001 : 0.004));
     if (!isFrozen(s, 'needs.fun'))     s.needs.fun     = clamp01(s.needs.fun + 0.002);
@@ -328,9 +328,9 @@ export function simulationTick(agents, worldState, gameTime) {
       (s.partner ? 0.05 : 0)       // partner bonus
     );
 
-    // 5. EMERGENT EVENTS — check thresholds (use economy prices)
+    // 5. EMERGENT EVENTS — check thresholds (use economy prices); eat earlier so agents stay less hungry
     const foodPrice = worldState.economy.prices?.food ?? worldState.economy.foodPrice ?? 5;
-    if (s.needs.hunger > 0.9 && s.status.wealth >= foodPrice) {
+    if (s.needs.hunger > 0.65 && s.status.wealth >= foodPrice) {
       events.push({ type: 'buy_food', agent: agent.name, auto: true });
     }
     if (s.needs.social > 0.85 && traits.introversion < 0.5) {
@@ -346,11 +346,11 @@ export function simulationTick(agents, worldState, gameTime) {
     // ★ 6. COGNITIVE BRIDGE — generate awareness events when state crosses thresholds
     // These become observations in the agent's memory stream via app.js
 
-    // ── Distress alerts (need is HIGH) ──
-    if (s.needs.hunger > 0.8 && !agent._lastHungerAlert) {
+    // ── Distress alerts (need is HIGH) — hunger alert only when very hungry so it doesn't dominate conversation
+    if (s.needs.hunger > 0.88 && !agent._lastHungerAlert) {
       events.push({ type: 'awareness', agent: agent.name, text: `I'm getting really hungry. I need to find food soon.`, importance: 6 });
       agent._lastHungerAlert = true;
-    } else if (s.needs.hunger < 0.4) { agent._lastHungerAlert = false; }
+    } else if (s.needs.hunger < 0.35) { agent._lastHungerAlert = false; }
 
     if (s.needs.rest > 0.8 && !agent._lastRestAlert) {
       events.push({ type: 'awareness', agent: agent.name, text: `I'm exhausted. I need to rest.`, importance: 5 });
