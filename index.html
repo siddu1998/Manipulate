@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simulate — AI World Simulation</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#9679;</text></svg>">
+</head>
+<body>
+
+  <!-- ═══ Settings Modal ═══ -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>API Keys</h2>
+        <button class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">Add at least one API key to power agent intelligence.</p>
+        <div class="api-key-group">
+          <label><span class="provider-badge openai">OpenAI</span> GPT-4o-mini</label>
+          <input type="password" id="openai-key" placeholder="sk-...">
+        </div>
+        <div class="api-key-group">
+          <label><span class="provider-badge anthropic">Anthropic</span> Claude Sonnet</label>
+          <input type="password" id="anthropic-key" placeholder="sk-ant-...">
+        </div>
+        <div class="api-key-group">
+          <label><span class="provider-badge gemini">Google</span> Gemini 2.0 Flash</label>
+          <input type="password" id="gemini-key" placeholder="AI...">
+        </div>
+        <div class="api-key-group">
+          <label><span class="provider-badge grok">xAI</span> Grok 3 Mini</label>
+          <input type="password" id="grok-key" placeholder="xai-...">
+        </div>
+        <div class="api-key-group">
+          <label>Active Provider</label>
+          <select id="primary-provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="grok">xAI Grok</option>
+          </select>
+        </div>
+        <button class="btn primary full-width">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Setup Screen (clean, minimal, white) ═══ -->
+  <div id="setup-screen">
+    <div class="setup-top-actions">
+      <button class="icon-btn" id="setup-settings-btn" title="API Keys">&#9881;</button>
+    </div>
+    <div class="setup-container">
+      <div class="setup-brand">simulate</div>
+      <div class="setup-main">
+        <textarea id="world-description" rows="1" placeholder="Describe your world..."></textarea>
+        <div class="setup-inhabitants">
+          <label for="inhabitant-count">Inhabitants</label>
+          <input type="number" id="inhabitant-count" min="3" max="20" value="8">
+        </div>
+      </div>
+      <div id="setup-status" class="status-text hidden"></div>
+      <div class="setup-hints">
+        <span>Try: "A medieval village with a tavern and blacksmith"</span>
+        <span>or "A tech startup office" or "An underwater kingdom"</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Game Screen (split layout: world left, sidebar right) ═══ -->
+  <div id="game-screen" class="hidden">
+
+    <!-- Left: World Canvas -->
+    <div id="world-area">
+      <canvas id="game-canvas"></canvas>
+
+      <!-- Floating HUD (minimal) -->
+      <div id="hud">
+        <div id="world-name"></div>
+        <div id="game-time">Day 1</div>
+        <div id="hud-controls">
+          <button class="hud-btn" title="Settings">S</button>
+          <button class="hud-btn" title="Minimap">M</button>
+          <button class="hud-btn" title="State Inspector" id="state-btn">I</button>
+        </div>
+      </div>
+
+      <!-- Minimap -->
+      <canvas id="minimap" class="hidden"></canvas>
+
+      <!-- NPC Info (floating over canvas) -->
+      <div id="npc-info" class="hidden">
+        <div class="npc-details">
+          <div class="npc-name"></div>
+          <div class="npc-occupation"></div>
+          <div class="npc-activity"></div>
+        </div>
+        <button class="btn small accent">Talk</button>
+      </div>
+
+      <!-- Interaction Hint -->
+      <div id="interaction-hint" class="hidden">Press <kbd>E</kbd> to talk</div>
+
+      <!-- Bottom Command Bar (always visible) -->
+      <div id="command-bar">
+        <input type="text" id="command-input" placeholder="Create events, change the world... (election, festival, fire, add building...)" autocomplete="off">
+      </div>
+    </div>
+
+    <!-- Right: Sidebar (tabs for different panels) -->
+    <div id="sidebar">
+      <div id="sidebar-tabs">
+        <button class="tab active" data-tab="tab-feed">Feed</button>
+        <button class="tab" data-tab="tab-chat">Chat</button>
+        <button class="tab" data-tab="tab-agents">Agents</button>
+        <button class="tab" data-tab="tab-world">World</button>
+      </div>
+
+      <!-- Tab: Conversation Feed -->
+      <div class="tab-content active" id="tab-feed">
+        <div class="feed-filter">
+          <select id="feed-filter-a">
+            <option value="all">Everyone</option>
+          </select>
+          <span style="color:var(--t3);font-size:9px;padding:0 4px">&amp;</span>
+          <select id="feed-filter-b">
+            <option value="all">Everyone</option>
+          </select>
+        </div>
+        <div id="conv-feed-list" class="scroll-area">
+          <div class="empty-state">Conversations will appear here as agents interact...</div>
+        </div>
+      </div>
+
+      <!-- Tab: Chat (with selected NPC) -->
+      <div class="tab-content" id="tab-chat">
+        <div id="chat-panel-inner">
+          <div class="chat-npc-header">
+            <span class="chat-npc-name">Select an NPC to chat</span>
+          </div>
+          <div id="chat-messages" class="scroll-area">
+            <div class="empty-state">Walk near an NPC and press E to start talking</div>
+          </div>
+          <div class="chat-input-group">
+            <input type="text" id="chat-input" placeholder="Say something..." autocomplete="off">
+            <button class="btn small accent">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Agents (state inspector) -->
+      <div class="tab-content" id="tab-agents">
+        <div class="panel-toolbar">
+          <select id="state-agent-select"><option value="">Select agent...</option></select>
+        </div>
+        <div class="scroll-area">
+          <!-- Agent Profile Header -->
+          <div id="agent-profile-header"></div>
+
+          <!-- Current Action -->
+          <div class="section-label">Current Action</div>
+          <div id="agent-action-display"></div>
+
+          <!-- Agent Summary (paper Appendix A) -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Agent Summary ▾</div>
+          <div id="agent-summary-display"></div>
+
+          <!-- Reflections (high-level insights) -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Reflections ▾</div>
+          <div id="agent-reflections"></div>
+
+          <!-- Needs -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Needs ▾</div>
+          <div id="needs-sliders"></div>
+
+          <!-- Traits -->
+          <div class="section-label section-collapsible closed" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Traits ▾</div>
+          <div id="traits-sliders" class="hidden"></div>
+
+          <!-- Status -->
+          <div class="section-label section-collapsible closed" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Status & Skills ▾</div>
+          <div id="status-display" class="hidden"></div>
+
+          <!-- Inventory -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Inventory ▾</div>
+          <div id="agent-inventory-display"></div>
+
+          <!-- Money & Transactions -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Money & Transactions ▾</div>
+          <div id="agent-transactions-display"></div>
+
+          <!-- Relationships -->
+          <div class="section-label section-collapsible closed" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Relationships ▾</div>
+          <div id="sim-relationships" class="hidden"></div>
+
+          <!-- Full Memory Stream -->
+          <div class="section-label section-collapsible" onclick="this.classList.toggle('closed');this.nextElementSibling.classList.toggle('hidden')">Memory Stream ▾</div>
+          <div id="memory-section">
+            <div class="memory-filters">
+              <button class="mem-filter-btn active" data-type="all">All</button>
+              <button class="mem-filter-btn" data-type="reflection">Reflections</button>
+              <button class="mem-filter-btn" data-type="dialogue">Dialogues</button>
+              <button class="mem-filter-btn" data-type="observation">Observations</button>
+              <button class="mem-filter-btn" data-type="plan">Plans</button>
+              <button class="mem-filter-btn" data-type="event">Events</button>
+            </div>
+            <div id="memory-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: World state -->
+      <div class="tab-content" id="tab-world">
+        <div class="scroll-area">
+          <div class="section-label">Resources</div>
+          <div id="world-resources"></div>
+          <div class="section-label">Technology</div>
+          <div id="world-tech"></div>
+          <div class="section-label">Economy & Governance</div>
+          <div id="world-economy"></div>
+          <div class="section-label">Simulation Log</div>
+          <div id="sim-log"></div>
+        </div>
+        <div class="panel-toolbar" style="border-top:1px solid var(--border)">
+          <button class="btn small" id="export-btn" style="width:100%">Export Research Data</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notifications -->
+    <div id="notifications"></div>
+  </div>
+
+  <!-- ═══ Loading Overlay ═══ -->
+  <div id="loading-overlay" class="hidden">
+    <div class="loading-content">
+      <div class="spinner"></div>
+      <div id="loading-text">Generating world...</div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+
+  <!-- Sidebar tab switching -->
+  <script>
+    document.addEventListener('click', function(e) {
+      if (e.target.classList.contains('tab')) {
+        document.querySelectorAll('#sidebar-tabs .tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('#sidebar .tab-content').forEach(t => t.classList.remove('active'));
+        e.target.classList.add('active');
+        document.getElementById(e.target.dataset.tab)?.classList.add('active');
+      }
+    });
+  </script>
+</body>
+</html>

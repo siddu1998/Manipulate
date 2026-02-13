@@ -1,0 +1,911 @@
+// ═══════════════════════════════════════════════════════════════════
+//  Community Event System
+//
+//  Orchestrates multi-NPC events like elections, festivals, meetings.
+//  Events run through timed phases, each triggering NPC behaviors
+//  and generating dynamic content via LLM.
+//
+//  Lifecycle:
+//    ANNOUNCE → GATHER → MAIN (speeches/debate) → RESOLVE → DONE
+// ═══════════════════════════════════════════════════════════════════
+
+export const EVENT_TEMPLATES = {
+  election: {
+    name: 'Village Election',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'Announcing the election...' },
+      { id: 'gather',   duration: 20000, label: 'Villagers are gathering...' },
+      { id: 'campaign', duration: 25000, label: 'Candidates are giving speeches...' },
+      { id: 'debate',   duration: 20000, label: 'Candidates are debating...' },
+      { id: 'vote',     duration: 12000, label: 'Villagers are voting...' },
+      { id: 'results',  duration: 10000, label: 'Counting the votes...' },
+    ],
+  },
+  festival: {
+    name: 'Village Festival',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A festival has been announced!' },
+      { id: 'gather',   duration: 20000, label: 'Everyone is heading to the festival...' },
+      { id: 'perform',  duration: 30000, label: 'Performances and celebrations...' },
+      { id: 'social',   duration: 25000, label: 'Villagers are socializing...' },
+      { id: 'conclude', duration: 8000,  label: 'The festival winds down...' },
+    ],
+  },
+  meeting: {
+    name: 'Town Meeting',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A town meeting has been called!' },
+      { id: 'gather',   duration: 18000, label: 'People are arriving...' },
+      { id: 'discuss',  duration: 30000, label: 'The discussion is underway...' },
+      { id: 'conclude', duration: 8000,  label: 'The meeting concludes...' },
+    ],
+  },
+  debate: {
+    name: 'Public Debate',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A debate has been announced!' },
+      { id: 'gather',   duration: 18000, label: 'People are gathering to watch...' },
+      { id: 'debate',   duration: 35000, label: 'The debate is heating up...' },
+      { id: 'conclude', duration: 8000,  label: 'The debate concludes...' },
+    ],
+  },
+  trial: {
+    name: 'Village Trial',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A trial has been called!' },
+      { id: 'gather',   duration: 18000, label: 'The village assembles...' },
+      { id: 'testimony', duration: 30000, label: 'Witnesses are testifying...' },
+      { id: 'verdict',  duration: 12000, label: 'The verdict is being decided...' },
+    ],
+  },
+  rally: {
+    name: 'Rally',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A rally has been called!' },
+      { id: 'gather',   duration: 20000, label: 'People are gathering for the rally...' },
+      { id: 'discuss',  duration: 28000, label: 'Speakers are addressing the crowd...' },
+      { id: 'conclude', duration: 8000,  label: 'The rally winds down.' },
+    ],
+  },
+  protest: {
+    name: 'Protest',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A protest has been organized!' },
+      { id: 'gather',   duration: 20000, label: 'Protesters are gathering...' },
+      { id: 'discuss',  duration: 28000, label: 'Chants and demands fill the square...' },
+      { id: 'conclude', duration: 8000,  label: 'The protest disperses.' },
+    ],
+  },
+  // Generic gathering — any kind: potluck, book club, support group, picnic, etc.
+  gathering: {
+    name: 'Gathering',
+    phases: [
+      { id: 'announce', duration: 5000,  label: 'A gathering has been called!' },
+      { id: 'gather',   duration: 20000, label: 'People are heading to the gathering...' },
+      { id: 'discuss',  duration: 28000, label: 'The gathering is underway...' },
+      { id: 'conclude', duration: 8000,  label: 'The gathering winds down.' },
+    ],
+  },
+};
+
+export class CommunityEvent {
+  constructor(type, building, topic, npcs, app, opts = {}) {
+    const template = EVENT_TEMPLATES[type] || EVENT_TEMPLATES.meeting;
+    this.type = type;
+    this.name = opts.customName || template.name;
+    this.topic = topic || this.name;
+    this.building = building;
+    this.phases = (opts.customPhases && opts.customPhases.length) ? opts.customPhases.map(p => ({ id: p.id || 'discuss', duration: p.duration || 15000, label: p.label || p.id })) : template.phases.map(p => ({ ...p }));
+    this.currentPhaseIndex = -1;
+    this.phaseTimer = 0;
+    this.npcs = npcs;       // all village NPCs
+    this.app = app;
+    this.active = true;
+
+    // Event-specific state
+    this.candidates = [];     // for elections
+    this.speeches = [];       // generated speeches
+    this.votes = new Map();   // npc name → candidate name
+    this.winner = null;
+    this.eventLog = [];       // full transcript
+
+    // Start first phase
+    this._advancePhase();
+  }
+
+  update(dt) {
+    if (!this.active) return;
+    this.phaseTimer -= dt;
+    if (this.phaseTimer <= 0) {
+      this._advancePhase();
+    }
+  }
+
+  _advancePhase() {
+    this.currentPhaseIndex++;
+    if (this.currentPhaseIndex >= this.phases.length) {
+      this.active = false;
+      this._onComplete();
+      return;
+    }
+
+    const phase = this.phases[this.currentPhaseIndex];
+    this.phaseTimer = phase.duration;
+
+    this.app.ui.notify(phase.label, 'info', 5000);
+    this._addToFeed('event', phase.label);
+
+    // Execute phase logic (visual/behavioral)
+    this._executePhase(phase.id);
+
+    // ★ GENERATIVE CONSEQUENCES: Ask the LLM what state changes this phase produces
+    this._generatePhaseEffects(phase).then(effects => {
+      if (effects) {
+        this._applyPhaseEffects(effects);
+        // Log what changed for transparency
+        if (effects.narration) {
+          console.log(`[Event:${this.name}] Phase "${phase.label}" effects:`, effects);
+        }
+      }
+    });
+  }
+
+  async _executePhase(phaseId) {
+    const building = this.building;
+    const doorX = building.x + (building.w >> 1);
+    const doorY = building.y + building.h + 1;
+
+    switch (phaseId) {
+      case 'announce': {
+        // ★ STAGGERED PROPAGATION: Only nearby NPCs hear immediately.
+        // Others learn through gossip diffusion over time.
+        const announceX = building.x + (building.w >> 1);
+        const announceY = building.y + (building.h >> 1);
+        const gameTime = this.app.gameTime;
+
+        for (const npc of this.npcs) {
+          const dist = Math.abs(npc.x - announceX) + Math.abs(npc.y - announceY);
+          if (dist < 20) {
+            // Nearby NPCs hear directly
+            if (npc.cognition) {
+              npc.cognition.addHotTopic(
+                `${this.name}: "${this.topic}" at ${building.name}`,
+                'town crier', 8, gameTime
+              );
+            }
+            npc.say(`${this.name} at ${building.name}!`, 3000);
+          } else {
+            // Far NPCs will learn through gossip — stagger with delay
+            const delay = 3000 + dist * 200 + Math.random() * 5000;
+            setTimeout(() => {
+              if (npc.cognition) {
+                npc.cognition.addHotTopic(
+                  `${this.name}: "${this.topic}" at ${building.name}`,
+                  'word of mouth', 6, gameTime
+                );
+              }
+            }, delay);
+          }
+        }
+        break;
+      }
+
+      case 'gather': {
+        // All NPCs walk to the building
+        for (const npc of this.npcs) {
+          if (npc.state === 'talking') continue;
+          npc.state = 'walking';
+          npc.currentActivity = `Heading to ${building.name} for the ${this.name}`;
+          const path = this.app.world.findPath(npc.x, npc.y, doorX, doorY);
+          if (path && path.length > 0) {
+            npc.path = path;
+            npc.pathIndex = 0;
+          }
+        }
+        this._addToFeed('narration', `The villagers begin making their way to ${building.name}...`);
+        break;
+      }
+
+      case 'campaign': {
+        // Pick 2-3 candidates and generate campaign speeches
+        await this._generateCampaignSpeeches();
+        break;
+      }
+
+      case 'debate': {
+        await this._generateDebate();
+        break;
+      }
+
+      case 'vote': {
+        await this._conductVoting();
+        break;
+      }
+
+      case 'results': {
+        this._announceResults();
+        break;
+      }
+
+      case 'perform': {
+        await this._generatePerformances();
+        break;
+      }
+
+      case 'social': {
+        this._triggerSocializing();
+        break;
+      }
+
+      case 'discuss': {
+        await this._generateDiscussion();
+        break;
+      }
+
+      case 'testimony': {
+        await this._generateTestimony();
+        break;
+      }
+
+      case 'verdict': {
+        this._announceVerdict();
+        break;
+      }
+
+      case 'conclude': {
+        this._conclude();
+        break;
+      }
+
+      default:
+        // Generated/custom phase: label already shown; no special logic
+        break;
+    }
+  }
+
+  // ─── Election: Campaign Speeches ────────────────────────────────
+  async _generateCampaignSpeeches() {
+    // Pick 2-3 candidates (prefer NPCs with leadership-adjacent roles)
+    const candidatePool = [...this.npcs].sort(() => Math.random() - 0.5);
+    this.candidates = candidatePool.slice(0, Math.min(3, candidatePool.length));
+
+    this._addToFeed('narration',
+      `${this.candidates.map(c => c.name).join(', ')} step forward as candidates!`
+    );
+
+    for (let i = 0; i < this.candidates.length; i++) {
+      const candidate = this.candidates[i];
+      let speech;
+
+      if (this.app.llm.hasAnyKey()) {
+        try {
+          const result = await this.app.llm.generate(
+            'Write a campaign pitch. Short, punchy, in-character. JSON only.',
+            `${candidate.name} (${candidate.occupation}, personality: ${candidate.personality}) is pitching themselves as leader.
+Topic: ${this.topic}
+They're speaking to ${this.npcs.length} people at ${this.building.name}.
+Write a 2-sentence speech that sounds like THEM, not a politician. Casual, passionate, imperfect.
+{"speech":"their pitch","slogan":"short slogan (2-4 words)"}`,
+            { json: true, temperature: 0.9, maxTokens: 200 }
+          );
+          speech = result.speech || `Vote for me! I'll make this village great!`;
+          if (result.slogan) {
+            this._addToFeed('event', `${candidate.name}'s slogan: "${result.slogan}"`);
+          }
+        } catch {
+          speech = `As your ${candidate.occupation}, I know what this village needs. Vote for me!`;
+        }
+      } else {
+        const speeches = [
+          `I've served this village as a ${candidate.occupation} for years. I know what we need!`,
+          `It's time for change! As your leader, I promise to listen to every voice!`,
+          `My experience as a ${candidate.occupation} has taught me that community comes first!`,
+        ];
+        speech = speeches[i % speeches.length];
+      }
+
+      this.speeches.push({ candidate: candidate.name, speech });
+
+      // Stagger the speeches
+      setTimeout(() => {
+        candidate.say(speech, 6000);
+        this._addToFeed('speech', `${candidate.name}: "${speech}"`, candidate.name);
+        if (candidate.cognition) {
+          candidate.cognition.memory.add(
+            `I gave a campaign speech at the election: "${speech}"`, 'dialogue', 7
+          );
+        }
+      }, i * 7000);
+
+      // Crowd reactions
+      setTimeout(() => {
+        const crowd = this.npcs.filter(n => !this.candidates.includes(n));
+        if (crowd.length > 0) {
+          const reactor = crowd[Math.floor(Math.random() * crowd.length)];
+          const reactions = ['Hear, hear!', 'Interesting...', 'That\'s a good point!', 'I\'m not so sure...', 'Yes!'];
+          reactor.say(reactions[Math.floor(Math.random() * reactions.length)], 2500);
+        }
+      }, i * 7000 + 4000);
+    }
+  }
+
+  // ─── Election: Debate ───────────────────────────────────────────
+  async _generateDebate() {
+    if (this.candidates.length < 2) return;
+
+    if (this.app.llm.hasAnyKey()) {
+      try {
+        const c1 = this.candidates[0], c2 = this.candidates[1];
+        const result = await this.app.llm.generate(
+          'Generate a heated debate exchange between two village election candidates. JSON only.',
+          `${c1.name} (${c1.occupation}) and ${c2.name} (${c2.occupation}) are debating.
+Topic: ${this.topic}
+${c1.name}'s speech was: "${this.speeches[0]?.speech || 'I want to lead.'}"
+${c2.name}'s speech was: "${this.speeches[1]?.speech || 'I want to lead.'}"
+
+Generate a 4-line back-and-forth debate exchange.
+{"lines":[{"speaker":"Name","text":"what they say"}]}`,
+          { json: true, temperature: 0.9, maxTokens: 300 }
+        );
+
+        const lines = result.lines || [];
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const speaker = this.npcs.find(n => n.name === line.speaker) || this.candidates[i % 2];
+          setTimeout(() => {
+            speaker.say(line.text, 5000);
+            this._addToFeed('speech', `${speaker.name}: "${line.text}"`, speaker.name);
+          }, i * 5500);
+        }
+      } catch {
+        this.candidates[0].say(`I respectfully disagree with my opponent!`, 4000);
+        setTimeout(() => this.candidates[1]?.say(`The facts speak for themselves!`, 4000), 4000);
+      }
+    } else {
+      this.candidates[0].say(`I respectfully disagree with my opponent!`, 4000);
+      setTimeout(() => this.candidates[1]?.say(`The facts speak for themselves!`, 4000), 4000);
+    }
+  }
+
+  // ─── Election: Voting ───────────────────────────────────────────
+  async _conductVoting() {
+    this._addToFeed('narration', 'The villagers cast their votes...');
+    const voters = this.npcs.filter(n => !this.candidates.includes(n));
+
+    if (this.app.llm.hasAnyKey() && voters.length > 0) {
+      try {
+        const candidateDesc = this.candidates.map(c => `${c.name} (${c.occupation})`).join(' vs ');
+        const speechSummary = this.speeches.map(s => `${s.candidate}: "${s.speech}"`).join('\n');
+
+        const result = await this.app.llm.generate(
+          'Simulate village election votes. JSON only.',
+          `Village election: ${candidateDesc}
+Speeches:
+${speechSummary}
+
+Voters:
+${voters.map(v => `${v.name} (${v.occupation}, personality: ${v.personality})`).join('\n')}
+
+Each voter votes based on their personality and how the speeches resonate with them.
+{"votes":[{"voter":"name","candidate":"name","reason":"brief reason"}]}`,
+          { json: true, temperature: 0.8, maxTokens: 500 }
+        );
+
+        for (const vote of (result.votes || [])) {
+          this.votes.set(vote.voter, vote.candidate);
+          const voter = this.npcs.find(n => n.name === vote.voter);
+          if (voter) {
+            setTimeout(() => {
+              voter.say(`I voted for ${vote.candidate}!`, 3000);
+              this._addToFeed('vote', `${vote.voter} votes for ${vote.candidate}: "${vote.reason}"`, vote.voter);
+            }, Math.random() * 8000);
+          }
+        }
+      } catch {
+        this._fallbackVoting(voters);
+      }
+    } else {
+      this._fallbackVoting(voters);
+    }
+
+    // Candidates vote for themselves
+    for (const c of this.candidates) {
+      this.votes.set(c.name, c.name);
+    }
+  }
+
+  _fallbackVoting(voters) {
+    for (const voter of voters) {
+      const choice = this.candidates[Math.floor(Math.random() * this.candidates.length)];
+      this.votes.set(voter.name, choice.name);
+      setTimeout(() => {
+        voter.say(`I'm voting for ${choice.name}!`, 3000);
+        this._addToFeed('vote', `${voter.name} votes for ${choice.name}`, voter.name);
+      }, Math.random() * 8000);
+    }
+  }
+
+  // ─── Election: Results ──────────────────────────────────────────
+  _announceResults() {
+    const gameTime = this.app.gameTime;
+
+    // Count votes
+    const tally = new Map();
+    for (const c of this.candidates) tally.set(c.name, 0);
+    for (const [, candidate] of this.votes) {
+      tally.set(candidate, (tally.get(candidate) || 0) + 1);
+    }
+
+    // Find winner
+    let maxVotes = 0;
+    for (const [name, count] of tally) {
+      if (count > maxVotes) { maxVotes = count; this.winner = name; }
+    }
+
+    const tallyStr = [...tally.entries()].map(([n, c]) => `${n}: ${c} votes`).join(', ');
+    this._addToFeed('event', `📊 RESULTS: ${tallyStr}`);
+    this._addToFeed('event', `🏆 ${this.winner} wins the election with ${maxVotes} votes and should become the village leader!`);
+
+    this.app.ui.notify(`🏆 ${this.winner} wins the election!`, 'success', 8000);
+
+    // Winner celebrates
+    const winnerNpc = this.npcs.find(n => n.name === this.winner);
+    if (winnerNpc) {
+      winnerNpc.say(`Thank you all! I won't let you down!`, 6000);
+      if (winnerNpc.cognition) {
+        winnerNpc.cognition.memory.add(`I won the village election! The people chose me as their leader.`, 'reflection', 9, gameTime);
+        // ★ Winner's gossip correctly says THEY won
+        winnerNpc.cognition.addHotTopic(`I won the village election!`, 'the election results', 8, gameTime);
+      }
+    }
+
+    // Losers react — with SPECIFIC memories about losing
+    for (const c of this.candidates) {
+      if (c.name !== this.winner) {
+        setTimeout(() => c.say('Congratulations... I accept the result.', 4000), 2000);
+        if (c.cognition) {
+          c.cognition.memory.add(`I lost the village election to ${this.winner}. I was a candidate but didn't get enough votes.`, 'reflection', 7, gameTime);
+          // ★ Losers gossip about the winner, not themselves
+          c.cognition.addHotTopic(`${this.winner} won the election`, 'the election results', 6, gameTime);
+        }
+      }
+    }
+
+    // ★ STAGGERED RESULTS: NPCs learn the results based on proximity
+    // Nearby NPCs learn immediately, far NPCs learn later through gossip
+    const announceX = this.building.x + (this.building.w >> 1);
+    const announceY = this.building.y + (this.building.h >> 1);
+
+    for (const npc of this.npcs) {
+      if (this.candidates.includes(npc)) continue; // candidates already handled above
+      if (!npc.cognition) continue;
+
+      const dist = Math.abs(npc.x - announceX) + Math.abs(npc.y - announceY);
+      const delay = dist < 15 ? 0 : 2000 + dist * 300;
+
+      setTimeout(() => {
+        // ★ Each NPC gets a SPECIFIC memory about the results (not "I won")
+        npc.cognition.memory.add(
+          `${this.winner} won the village election with ${maxVotes} votes. Results: ${tallyStr}.`,
+          'event', 7, gameTime
+        );
+        // ★ Gossip topic is about the WINNER, not about themselves
+        npc.cognition.addHotTopic(
+          `${this.winner} won the village election`,
+          'election results', 7, gameTime
+        );
+      }, delay);
+    }
+  }
+
+  // ─── Festival / Generic Event Phases ────────────────────────────
+  async _generatePerformances() {
+    const performer = this.npcs[Math.floor(Math.random() * this.npcs.length)];
+    if (this.app.llm.hasAnyKey()) {
+      try {
+        const result = await this.app.llm.generate(
+          'Generate a brief festival performance. JSON only.',
+          `${performer.name} (${performer.occupation}) performs at a village festival.\n{"performance":"what they do","crowd_reaction":"how people react"}`,
+          { json: true, temperature: 0.9, maxTokens: 128 }
+        );
+        performer.say(result.performance || 'I have a song for everyone!', 5000);
+        this._addToFeed('event', `🎭 ${performer.name}: ${result.performance}`);
+        setTimeout(() => {
+          const reactor = this.npcs.find(n => n !== performer);
+          if (reactor) reactor.say(result.crowd_reaction || 'Wonderful!', 3000);
+        }, 4000);
+      } catch {
+        performer.say('Let me entertain you all!', 4000);
+      }
+    } else {
+      performer.say('Let me sing a song for the festival!', 4000);
+      this._addToFeed('event', `🎭 ${performer.name} performs at the festival!`);
+    }
+  }
+
+  _triggerSocializing() {
+    this._addToFeed('narration', 'The villagers mingle and enjoy the festivities...');
+    // Trigger a burst of NPC-NPC conversations
+    for (let i = 0; i < 3; i++) {
+      const a = this.npcs[Math.floor(Math.random() * this.npcs.length)];
+      const b = this.npcs.find(n => n !== a);
+      if (a && b) {
+        setTimeout(() => {
+          a.say(`Great event, isn't it ${b.name}?`, 3000);
+          setTimeout(() => b.say('Absolutely! We should do this more often!', 3000), 2000);
+        }, i * 5000);
+      }
+    }
+  }
+
+  async _generateDiscussion() {
+    this._addToFeed('narration', `The discussion about "${this.topic}" begins...`);
+    // Pick 3 NPCs to voice opinions
+    const speakers = [...this.npcs].sort(() => Math.random() - 0.5).slice(0, 3);
+    for (let i = 0; i < speakers.length; i++) {
+      const npc = speakers[i];
+      if (this.app.llm.hasAnyKey()) {
+        try {
+          const result = await this.app.llm.generate(
+            'Generate a brief opinion for a town meeting. JSON only.',
+            `${npc.name} (${npc.occupation}, personality: ${npc.personality}) voices their opinion about "${this.topic}" at a town meeting.\n{"opinion":"their opinion in 1-2 sentences"}`,
+            { json: true, temperature: 0.9, maxTokens: 100 }
+          );
+          setTimeout(() => {
+            npc.say(result.opinion || 'I think we need to discuss this further.', 5000);
+            this._addToFeed('speech', `${npc.name}: "${result.opinion}"`, npc.name);
+          }, i * 6000);
+        } catch {
+          setTimeout(() => npc.say('I have thoughts on this matter.', 4000), i * 6000);
+        }
+      } else {
+        setTimeout(() => {
+          npc.say(`As a ${npc.occupation}, here\'s what I think...`, 4000);
+          this._addToFeed('speech', `${npc.name} shares their perspective.`, npc.name);
+        }, i * 6000);
+      }
+    }
+  }
+
+  async _generateTestimony() {
+    this._addToFeed('narration', 'Witnesses step forward to give testimony...');
+    const witnesses = [...this.npcs].sort(() => Math.random() - 0.5).slice(0, 2);
+    for (let i = 0; i < witnesses.length; i++) {
+      setTimeout(() => {
+        witnesses[i].say('I swear to tell the truth. Here is what I witnessed...', 5000);
+        this._addToFeed('speech', `${witnesses[i].name} gives their testimony.`, witnesses[i].name);
+      }, i * 8000);
+    }
+  }
+
+  _announceVerdict() {
+    const judge = this.npcs.find(n => /mayor|priest|elder|judge/i.test(n.occupation)) || this.npcs[0];
+    judge.say('After careful deliberation, the verdict has been reached!', 5000);
+    this._addToFeed('event', `⚖️ ${judge.name} delivers the verdict.`);
+  }
+
+  _conclude() {
+    this._addToFeed('narration', `The ${this.name} has concluded. Villagers begin to disperse.`);
+    for (const npc of this.npcs) {
+      npc.state = 'idle';
+      npc.waitTimer = 2000 + Math.random() * 3000;
+      npc.currentActivity = `Returning from the ${this.name}`;
+    }
+  }
+
+  _onComplete() {
+    this.app.ui.notify(`${this.name} has ended.`, 'info', 4000);
+    this._conclude();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  GENERATIVE CONSEQUENCE ENGINE
+  //
+  //  Every event phase asks the LLM: "Given what's happening, what
+  //  should change in the simulation?" The LLM returns structured
+  //  state mutations that get applied to agents and the world.
+  //
+  //  This handles ANY event — weddings, funerals, duels, coronations,
+  //  potlucks, rituals — without hardcoding a single one.
+  // ═══════════════════════════════════════════════════════════════════
+
+  async _generatePhaseEffects(phase) {
+    if (!this.app.llm.hasAnyKey()) return null;
+
+    const attendees = this.npcs.map(n => {
+      const s = n.sim;
+      if (!s) return `${n.name} (${n.occupation})`;
+      return `${n.name} (${n.occupation}, partner: ${s.partner || 'none'}, happiness: ${s.status.happiness.toFixed(0)}, wealth: ${s.status.wealth.toFixed(0)})`;
+    }).join('\n');
+
+    const worldState = this.app.worldSim;
+    const worldContext = worldState ? `Resources: food=${worldState.resources.food.toFixed(0)}, gold=${worldState.resources.gold.toFixed(0)}. Leader: ${worldState.governance.leader || 'none'}. Unrest: ${worldState.governance.unrest.toFixed(0)}. Prosperity: ${worldState.economy.prosperity.toFixed(0)}.` : '';
+
+    // Build context about the event so far
+    const eventSoFar = this.eventLog.slice(-6).map(e => e.text).join(' | ');
+
+    try {
+      const result = await this.app.llm.generate(
+        `You are the simulation consequence engine for a living village simulation. When an event phase happens, you decide what REAL changes occur to the agents and world. You output structured JSON describing state mutations.
+
+AVAILABLE STATE FIELDS:
+- Agent needs (0=satisfied, 1=desperate): hunger, rest, social, safety, fun, purpose, romance
+- Agent status (0-100): health, wealth, reputation, happiness, energy
+- Agent skills (0-10): farming, crafting, cooking, trading, leadership, medicine, combat, art, science, persuasion
+- Agent fields: partner (string name or null), knowledge (string to add)
+- Relationships between agents: trust (0-1), attraction (0-1), respect (0-1), familiarity (0-1), fear (0-1), rivalry (0-1), label (string)
+- World: resources.food, resources.gold, resources.wood, resources.stone, governance.leader, governance.unrest (0-100), economy.prosperity (0-100), economy.treasury
+
+OUTPUT FORMAT (JSON only):
+{
+  "agent_effects": {
+    "needs": {"hunger": -0.1, "social": -0.2},
+    "status": {"happiness": 5},
+    "skills": {}
+  },
+  "per_agent": [
+    {"name": "AgentName", "set": {"partner": "OtherName"}, "needs": {"romance": -0.5}, "status": {"happiness": 15}, "knowledge": "I got married to OtherName"}
+  ],
+  "relationships": [
+    {"agent": "A", "target": "B", "changes": {"trust": 0.1, "familiarity": 0.05, "label": "married"}}
+  ],
+  "world": {"governance.unrest": -3, "economy.prosperity": 1},
+  "knowledge_all": "Something everyone learns about",
+  "narration": "Brief description of what happened"
+}
+
+RULES:
+- "agent_effects" applies to ALL attendees. Use for general mood (everyone gets happier at a party).
+- "per_agent" applies to SPECIFIC named agents. Use for targeted changes (the couple getting married, the election winner, etc).
+- "relationships" changes specific relationship pairs.
+- "world" changes world-level state. Use dot notation for nested fields.
+- "knowledge_all" is a fact added to every agent's knowledge.
+- Keep changes proportional. A single phase shouldn't transform everything.
+- You CAN set partner, leader, or any string field via per_agent "set".
+- Return empty objects/arrays for sections with no changes.`,
+
+        `EVENT: "${this.name}" (type: ${this.type})
+TOPIC: "${this.topic}"
+PHASE: "${phase.label}" (phase ${this.currentPhaseIndex + 1} of ${this.phases.length})
+LOCATION: ${this.building.name}
+EVENT SO FAR: ${eventSoFar || 'Just started'}
+
+ATTENDEES:
+${attendees}
+
+WORLD STATE: ${worldContext}
+
+What simulation state changes should this phase produce? Consider what would REALISTICALLY happen to people experiencing this. Be specific about which agents are affected and how.`,
+        { json: true, temperature: 0.7, maxTokens: 600 }
+      );
+
+      return result;
+    } catch (err) {
+      console.warn('Phase effects generation failed:', err.message);
+      return null;
+    }
+  }
+
+  _applyPhaseEffects(effects) {
+    if (!effects) return;
+    const ws = this.app.worldSim;
+    const changeLog = []; // collect human-readable state change descriptions
+
+    // ── 1. Apply universal agent effects (all attendees) ──
+    if (effects.agent_effects) {
+      const ae = effects.agent_effects;
+      const parts = [];
+      if (ae.needs) for (const [k, v] of Object.entries(ae.needs)) { if (typeof v === 'number') parts.push(`${k} ${v > 0 ? '+' : ''}${v.toFixed(2)}`); }
+      if (ae.status) for (const [k, v] of Object.entries(ae.status)) { if (typeof v === 'number') parts.push(`${k} ${v > 0 ? '+' : ''}${v.toFixed(0)}`); }
+      if (parts.length) changeLog.push(`All attendees: ${parts.join(', ')}`);
+      for (const npc of this.npcs) {
+        if (!npc.sim) continue;
+        this._applyDeltasToAgent(npc, effects.agent_effects);
+      }
+    }
+
+    // ── 2. Apply per-agent targeted effects ──
+    if (effects.per_agent && Array.isArray(effects.per_agent)) {
+      for (const pa of effects.per_agent) {
+        const npc = this.npcs.find(n => n.name === pa.name || n.name.toLowerCase().includes((pa.name || '').toLowerCase()));
+        if (!npc?.sim) continue;
+
+        // Log per-agent changes
+        const parts = [];
+        if (pa.needs) for (const [k, v] of Object.entries(pa.needs)) { if (typeof v === 'number') parts.push(`${k} ${v > 0 ? '+' : ''}${v.toFixed(2)}`); }
+        if (pa.status) for (const [k, v] of Object.entries(pa.status)) { if (typeof v === 'number') parts.push(`${k} ${v > 0 ? '+' : ''}${v.toFixed(0)}`); }
+        if (pa.set) for (const [k, v] of Object.entries(pa.set)) { parts.push(`${k} → ${v}`); }
+        if (parts.length) changeLog.push(`${pa.name}: ${parts.join(', ')}`);
+
+        // Apply numeric deltas
+        this._applyDeltasToAgent(npc, pa);
+
+        // Apply "set" fields (partner, any string field)
+        if (pa.set && typeof pa.set === 'object') {
+          for (const [key, val] of Object.entries(pa.set)) {
+            if (key === 'partner') {
+              npc.sim.partner = val;
+            } else if (key in npc.sim) {
+              npc.sim[key] = val;
+            }
+          }
+        }
+
+        // Add specific knowledge
+        if (pa.knowledge && typeof pa.knowledge === 'string') {
+          npc.sim.knowledge.add(pa.knowledge);
+          if (npc.cognition) {
+            npc.cognition.memory.add(pa.knowledge, 'event', 7, this.app.gameTime);
+            npc.cognition.addHotTopic(pa.knowledge, this.name, 7, this.app.gameTime);
+          }
+        }
+      }
+    }
+
+    // ── 3. Apply relationship changes ──
+    if (effects.relationships && Array.isArray(effects.relationships)) {
+      for (const rc of effects.relationships) {
+        const agent = this.npcs.find(n => n.name === rc.agent || n.name.toLowerCase().includes((rc.agent || '').toLowerCase()));
+        const target = this.npcs.find(n => n.name === rc.target || n.name.toLowerCase().includes((rc.target || '').toLowerCase()));
+        if (!agent || !target) continue;
+
+        // Log relationship changes
+        const ch = rc.changes || {};
+        const relParts = [];
+        for (const dim of ['trust', 'attraction', 'respect', 'familiarity', 'fear', 'rivalry']) {
+          if (typeof ch[dim] === 'number') relParts.push(`${dim} ${ch[dim] > 0 ? '+' : ''}${ch[dim].toFixed(2)}`);
+        }
+        if (ch.label) relParts.push(`label → ${ch.label}`);
+        if (relParts.length) changeLog.push(`${rc.agent} ↔ ${rc.target}: ${relParts.join(', ')}`);
+
+        // Get or create relationship in both directions
+        if (!agent.simRelationships) agent.simRelationships = new Map();
+        if (!agent.simRelationships.has(target.name)) {
+          agent.simRelationships.set(target.name, { trust: 0.3, attraction: 0.1, respect: 0.3, familiarity: 0.2, fear: 0, rivalry: 0, interactions: 1, label: 'stranger' });
+        }
+        const rel = agent.simRelationships.get(target.name);
+
+        if (!target.simRelationships) target.simRelationships = new Map();
+        if (!target.simRelationships.has(agent.name)) {
+          target.simRelationships.set(agent.name, { trust: 0.3, attraction: 0.1, respect: 0.3, familiarity: 0.2, fear: 0, rivalry: 0, interactions: 1, label: 'stranger' });
+        }
+        const tRel = target.simRelationships.get(agent.name);
+
+        for (const dim of ['trust', 'attraction', 'respect', 'familiarity', 'fear', 'rivalry']) {
+          if (typeof ch[dim] === 'number') {
+            rel[dim] = Math.max(0, Math.min(1, rel[dim] + this._clamp(ch[dim], -0.4, 0.4)));
+            tRel[dim] = Math.max(0, Math.min(1, tRel[dim] + this._clamp(ch[dim], -0.4, 0.4)));
+          }
+        }
+        if (typeof ch.label === 'string') {
+          rel.label = ch.label;
+          tRel.label = ch.label;
+        }
+        rel.interactions++;
+        tRel.interactions++;
+      }
+    }
+
+    // ── 4. Apply world state changes ──
+    if (effects.world && typeof effects.world === 'object' && ws) {
+      for (const [path, delta] of Object.entries(effects.world)) {
+        if (typeof delta !== 'number' && typeof delta !== 'string') continue;
+        const parts = path.split('.');
+        let obj = ws;
+        for (let i = 0; i < parts.length - 1; i++) {
+          obj = obj?.[parts[i]];
+        }
+        const key = parts[parts.length - 1];
+        if (obj && key in obj) {
+          if (typeof delta === 'number') {
+            const before = obj[key];
+            obj[key] = typeof obj[key] === 'number'
+              ? Math.max(0, Math.min(100, obj[key] + this._clamp(delta, -15, 15)))
+              : delta;
+            changeLog.push(`World ${path}: ${typeof before === 'number' ? before.toFixed(1) : before} → ${typeof obj[key] === 'number' ? obj[key].toFixed(1) : obj[key]}`);
+          } else {
+            const before = obj[key];
+            obj[key] = delta; // string assignment (e.g., governance.leader)
+            changeLog.push(`World ${path}: ${before || 'none'} → ${delta}`);
+          }
+        }
+      }
+    }
+
+    // ── 5. Universal knowledge ──
+    if (effects.knowledge_all && typeof effects.knowledge_all === 'string') {
+      changeLog.push(`All agents learned: "${effects.knowledge_all}"`);
+      for (const npc of this.npcs) {
+        if (npc.sim) npc.sim.knowledge.add(effects.knowledge_all);
+        if (npc.cognition) {
+          npc.cognition.memory.add(effects.knowledge_all, 'event', 6, this.app.gameTime);
+          npc.cognition.addHotTopic(effects.knowledge_all, this.name, 6, this.app.gameTime);
+        }
+      }
+    }
+
+    // ── 6. Narration + state changes to feed ──
+    if (effects.narration && typeof effects.narration === 'string') {
+      this._addToFeed('narration', effects.narration);
+    }
+
+    // ★ Push state changes to the feed so the user can see what actually changed
+    if (changeLog.length > 0) {
+      this.app._addToConversationFeed({
+        speaker1: '⚙️ Simulation',
+        speaker2: '',
+        lines: changeLog.map(c => ({ speaker: '⚙️', text: c })),
+        stateChanges: changeLog,
+        topic: 'state change',
+        location: this.building.name,
+        gameTime: `${this.app.gameTime.hours}:${String(this.app.gameTime.minutes).padStart(2, '0')}`,
+      });
+    }
+  }
+
+  // Apply needs/status/skills deltas to a single agent
+  _applyDeltasToAgent(npc, deltas) {
+    const s = npc.sim;
+    if (!s) return;
+
+    if (deltas.needs && typeof deltas.needs === 'object') {
+      for (const [key, delta] of Object.entries(deltas.needs)) {
+        if (typeof delta === 'number' && key in s.needs) {
+          s.needs[key] = Math.max(0, Math.min(1, s.needs[key] + this._clamp(delta, -0.5, 0.5)));
+        }
+      }
+    }
+
+    if (deltas.status && typeof deltas.status === 'object') {
+      for (const [key, delta] of Object.entries(deltas.status)) {
+        if (typeof delta === 'number' && key in s.status) {
+          s.status[key] = Math.max(0, Math.min(100, s.status[key] + this._clamp(delta, -25, 25)));
+        }
+      }
+    }
+
+    if (deltas.skills && typeof deltas.skills === 'object') {
+      for (const [key, delta] of Object.entries(deltas.skills)) {
+        if (typeof delta === 'number' && key in s.skills) {
+          s.skills[key] = Math.max(0, Math.min(10, s.skills[key] + this._clamp(delta, -1, 1)));
+        }
+      }
+    }
+  }
+
+  _clamp(val, min, max) {
+    return Math.max(min, Math.min(max, val));
+  }
+
+  // ─── Feed Helper ────────────────────────────────────────────────
+  _addToFeed(type, text, speaker = null) {
+    this.eventLog.push({ type, text, speaker, time: Date.now() });
+    this.app._addToConversationFeed({
+      speaker1: speaker || '📢',
+      speaker2: '',
+      lines: [{ speaker: type === 'narration' ? '📖 Narrator' : (speaker || '📢'), text }],
+      topic: this.topic,
+      location: this.building.name,
+      gameTime: `${this.app.gameTime.hours}:${String(this.app.gameTime.minutes).padStart(2, '0')}`,
+    });
+  }
+}
+
+// ─── Detect event type from text ──────────────────────────────────
+// Returns a known template type if it matches, or 'dynamic' for any
+// event the simulation hasn't seen before (wedding, funeral, duel, etc.)
+export function detectEventType(text) {
+  const t = text.toLowerCase();
+  if (/election|vote|voting|elect|campaign|candidate/.test(t)) return 'election';
+  if (/festival|celebration|party|feast|carnival/.test(t)) return 'festival';
+  if (/meeting|council|assembly|town hall/.test(t)) return 'meeting';
+  if (/rally|rallies|march|demonstration/.test(t)) return 'rally';
+  if (/protest|protests|demonstration|strike/.test(t)) return 'protest';
+  if (/debate|argument|deliberat/.test(t)) return 'debate';
+  if (/trial|judge|verdict|guilty|innocent/.test(t)) return 'trial';
+  if (/gathering|gatherings|get together|meet up|potluck|book club|support group|get-together|reunion|picnic|village get-together|community meet|block party/.test(t)) return 'gathering';
+  // ★ Any event-like text that isn't a known template becomes a dynamic event
+  // The LLM will generate phases and consequences for it
+  if (/wedding|marriage|marry|funeral|memorial|coronation|duel|fight|ceremony|ritual|baptism|birthday|anniversary|banquet|feast|concert|parade|vigil|auction|competition|tournament|race|contest|sacrifice|prayer|blessing|curse|exile|banish|crowning|inaugurat|graduat|farewell|welcome|celebrat/.test(t)) return 'dynamic';
+  return null;
+}
