@@ -215,6 +215,18 @@ export class Renderer {
       }
     }
 
+    // 1b) Draw parametric special shapes (planets, orbs, arenas)
+    if (world.specialShapes && world.specialShapes.length > 0) {
+      for (const shape of world.specialShapes) {
+        const scx = (shape.x ?? 32) * TILE_SIZE + TILE_SIZE / 2;
+        const scy = (shape.y ?? 24) * TILE_SIZE + TILE_SIZE / 2;
+        const sr = (shape.radius ?? 2) * TILE_SIZE;
+        if (scx + sr < this.camX - 64 || scx - sr > this.camX + this.viewW + 64) continue;
+        if (scy + sr < this.camY - 64 || scy - sr > this.camY + this.viewH + 64) continue;
+        this._drawSpecialShape(ctx, shape);
+      }
+    }
+
     // 2) Draw building overlays (colored, with type-specific decorations)
     for (const b of world.buildings) {
       const bpx = b.x * TILE_SIZE;
@@ -303,6 +315,13 @@ export class Renderer {
   // ─── Building Rendering ─────────────────────────────────────────
   _drawBuilding(ctx, b) {
     const TS = TILE_SIZE;
+
+    // ★ Parametric shape buildings — draw from shape spec, skip default
+    if (b.shape && b.shape !== 'default') {
+      this._drawShapedBuilding(ctx, b);
+      return;
+    }
+
     const px = b.x * TS;
     const py = b.y * TS;
     const pw = b.w * TS;
@@ -529,6 +548,404 @@ export class Renderer {
       ctx.fillStyle = '#C8960C';
       ctx.fillRect(px + pw + 4, py + ph - 10, 6, 4);
     }
+  }
+
+  // ─── Parametric Shaped Buildings ──────────────────────────────────
+  _drawShapedBuilding(ctx, b) {
+    const TS = TILE_SIZE;
+    const px = b.x * TS;
+    const py = b.y * TS;
+    const pw = b.w * TS;
+    const ph = b.h * TS;
+    const cx = px + pw / 2;
+    const cy = py + ph / 2;
+    const shape = (b.shape || '').toLowerCase();
+
+    ctx.save();
+
+    if (shape === 'pyramid') {
+      // ── Egyptian Pyramid ──
+      // Shadow/back face
+      ctx.fillStyle = this._adj(b.color, -30);
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 4);         // apex
+      ctx.lineTo(px + pw, py + ph);   // bottom-right
+      ctx.lineTo(cx, py + ph);        // bottom-center
+      ctx.closePath();
+      ctx.fill();
+      // Front face (lighter)
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 4);         // apex
+      ctx.lineTo(px, py + ph);        // bottom-left
+      ctx.lineTo(cx, py + ph);        // bottom-center
+      ctx.closePath();
+      ctx.fill();
+      // Block lines for texture
+      ctx.strokeStyle = this._adj(b.color, -15);
+      ctx.lineWidth = 1;
+      const rows = 6;
+      for (let i = 1; i < rows; i++) {
+        const t = i / rows;
+        const ly = py + 4 + (ph - 4) * t;
+        const lx1 = cx - (pw / 2) * t;
+        const lx2 = cx + (pw / 2) * t;
+        ctx.beginPath();
+        ctx.moveTo(lx1, ly);
+        ctx.lineTo(lx2, ly);
+        ctx.stroke();
+      }
+      // Capstone/top
+      ctx.fillStyle = b.roofColor || '#daa520';
+      ctx.beginPath();
+      ctx.moveTo(cx, py);
+      ctx.lineTo(cx - 8, py + 12);
+      ctx.lineTo(cx + 8, py + 12);
+      ctx.closePath();
+      ctx.fill();
+
+    } else if (shape === 'step_pyramid') {
+      // ── Step Pyramid / Ziggurat ──
+      const steps = 4;
+      for (let i = 0; i < steps; i++) {
+        const t = i / steps;
+        const sw = pw * (1 - t * 0.7);
+        const sh = ph / steps;
+        const sx = cx - sw / 2;
+        const sy = py + ph - sh * (i + 1);
+        ctx.fillStyle = i % 2 === 0 ? b.color : this._adj(b.color, -15);
+        ctx.fillRect(sx, sy, sw, sh);
+        ctx.strokeStyle = this._adj(b.color, -25);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx, sy, sw, sh);
+      }
+      // Top platform
+      ctx.fillStyle = b.roofColor || '#daa520';
+      const topW = pw * 0.2;
+      ctx.fillRect(cx - topW / 2, py + 2, topW, ph / steps - 2);
+
+    } else if (shape === 'dome') {
+      // ── Dome / Taj Mahal style ──
+      // Base/walls
+      const baseH = ph * 0.45;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(px + 4, py + ph - baseH, pw - 8, baseH);
+      // Pillars
+      ctx.fillStyle = this._adj(b.color, -10);
+      ctx.fillRect(px + 4, py + ph - baseH, 6, baseH);
+      ctx.fillRect(px + pw - 10, py + ph - baseH, 6, baseH);
+      // Main dome
+      const domeR = pw * 0.38;
+      const domeY = py + ph - baseH;
+      ctx.fillStyle = b.roofColor || '#f5f5dc';
+      ctx.beginPath();
+      ctx.arc(cx, domeY, domeR, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      // Dome highlight
+      ctx.fillStyle = this._adj(b.roofColor || '#f5f5dc', 20);
+      ctx.beginPath();
+      ctx.arc(cx - domeR * 0.15, domeY - domeR * 0.1, domeR * 0.6, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      // Finial on top
+      ctx.fillStyle = '#daa520';
+      ctx.beginPath();
+      ctx.arc(cx, domeY - domeR + 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillRect(cx - 1, domeY - domeR - 6, 2, 8);
+      // Door arch
+      ctx.fillStyle = this._adj(b.color, -35);
+      ctx.beginPath();
+      ctx.arc(cx, py + ph - 3, TS * 0.4, Math.PI, 0);
+      ctx.fillRect(cx - TS * 0.4, py + ph - 3, TS * 0.8, 3);
+      ctx.fill();
+
+    } else if (shape === 'obelisk') {
+      // ── Obelisk ──
+      const tapering = 0.4;
+      const topW = pw * tapering;
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.moveTo(cx - topW / 2, py + 10);
+      ctx.lineTo(cx + topW / 2, py + 10);
+      ctx.lineTo(cx + pw * 0.35, py + ph);
+      ctx.lineTo(cx - pw * 0.35, py + ph);
+      ctx.closePath();
+      ctx.fill();
+      // Side shading
+      ctx.fillStyle = this._adj(b.color, -20);
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 10);
+      ctx.lineTo(cx + topW / 2, py + 10);
+      ctx.lineTo(cx + pw * 0.35, py + ph);
+      ctx.lineTo(cx, py + ph);
+      ctx.closePath();
+      ctx.fill();
+      // Pyramidion (gold top)
+      ctx.fillStyle = b.roofColor || '#daa520';
+      ctx.beginPath();
+      ctx.moveTo(cx, py);
+      ctx.lineTo(cx - topW / 2 - 2, py + 12);
+      ctx.lineTo(cx + topW / 2 + 2, py + 12);
+      ctx.closePath();
+      ctx.fill();
+      // Hieroglyph-like marks
+      ctx.fillStyle = this._adj(b.color, -10);
+      for (let i = 0; i < 4; i++) {
+        const my = py + 20 + i * (ph * 0.18);
+        ctx.fillRect(cx - 4, my, 8, 2);
+        ctx.fillRect(cx - 2, my + 4, 4, 2);
+      }
+
+    } else if (shape === 'minaret') {
+      // ── Minaret / Tower ──
+      const towerW = pw * 0.5;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(cx - towerW / 2, py + 16, towerW, ph - 16);
+      // Balcony ring
+      ctx.fillStyle = this._adj(b.color, -15);
+      ctx.fillRect(cx - towerW / 2 - 4, py + ph * 0.35, towerW + 8, 6);
+      ctx.fillRect(cx - towerW / 2 - 4, py + ph * 0.6, towerW + 8, 6);
+      // Dome on top
+      ctx.fillStyle = b.roofColor || '#daa520';
+      ctx.beginPath();
+      ctx.arc(cx, py + 16, towerW * 0.6, Math.PI, 0);
+      ctx.fill();
+      // Spire
+      ctx.fillStyle = '#daa520';
+      ctx.fillRect(cx - 1, py, 2, 18);
+      ctx.beginPath();
+      ctx.arc(cx, py + 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else if (shape === 'pagoda') {
+      // ── Pagoda ──
+      const levels = 4;
+      for (let i = 0; i < levels; i++) {
+        const t = i / levels;
+        const lw = pw * (1 - t * 0.5);
+        const lh = ph / levels;
+        const lx = cx - lw / 2;
+        const ly = py + ph - lh * (i + 1);
+        // Tier body
+        ctx.fillStyle = i % 2 === 0 ? b.color : this._adj(b.color, 15);
+        ctx.fillRect(lx + 4, ly + 6, lw - 8, lh - 6);
+        // Upswept roof
+        ctx.fillStyle = b.roofColor || '#4a0000';
+        ctx.beginPath();
+        ctx.moveTo(lx - 4, ly + 8);
+        ctx.quadraticCurveTo(lx + lw / 2, ly - 4, lx + lw + 4, ly + 8);
+        ctx.lineTo(lx + lw + 4, ly + 10);
+        ctx.lineTo(lx - 4, ly + 10);
+        ctx.closePath();
+        ctx.fill();
+      }
+      // Spire
+      ctx.fillStyle = '#daa520';
+      ctx.fillRect(cx - 1, py - 8, 2, 14);
+
+    } else if (shape === 'colosseum') {
+      // ── Colosseum / Arena ──
+      const rx = pw / 2 - 4;
+      const ry = ph / 2 - 4;
+      // Outer ring
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Inner arena (dark)
+      ctx.fillStyle = this._adj(b.color, -40);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx * 0.6, ry * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Arena floor (sand)
+      ctx.fillStyle = '#d4b88c';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx * 0.55, ry * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Arches around the outside
+      ctx.strokeStyle = this._adj(b.color, -20);
+      ctx.lineWidth = 2;
+      for (let a = 0; a < 12; a++) {
+        const angle = (a / 12) * Math.PI * 2;
+        const ax = cx + Math.cos(angle) * rx * 0.85;
+        const ay = cy + Math.sin(angle) * ry * 0.85;
+        ctx.beginPath();
+        ctx.arc(ax, ay, 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+    } else if (shape === 'tent') {
+      // ── Tent / Pavilion ──
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 4);
+      ctx.lineTo(px + pw - 2, py + ph);
+      ctx.lineTo(px + 2, py + ph);
+      ctx.closePath();
+      ctx.fill();
+      // Stripe pattern
+      ctx.fillStyle = b.roofColor || '#c9302c';
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 4);
+      ctx.lineTo(cx + pw * 0.25, py + ph);
+      ctx.lineTo(cx - pw * 0.05, py + ph);
+      ctx.closePath();
+      ctx.fill();
+      // Pole
+      ctx.fillStyle = '#8B6914';
+      ctx.fillRect(cx - 1, py, 2, ph);
+      // Flag
+      ctx.fillStyle = b.roofColor || '#c0392b';
+      ctx.fillRect(cx + 1, py, 10, 6);
+
+    } else if (shape === 'hut') {
+      // ── Round Hut / Thatched ──
+      // Circular wall
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + ph * 0.1, pw * 0.4, ph * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Conical thatch roof
+      ctx.fillStyle = b.roofColor || '#8B6914';
+      ctx.beginPath();
+      ctx.moveTo(cx, py + 2);
+      ctx.lineTo(px + pw - 6, cy - ph * 0.05);
+      ctx.lineTo(px + 6, cy - ph * 0.05);
+      ctx.closePath();
+      ctx.fill();
+      // Thatch texture lines
+      ctx.strokeStyle = this._adj(b.roofColor || '#8B6914', -15);
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 5; i++) {
+        const lx = px + 10 + i * (pw - 20) / 5;
+        ctx.beginPath();
+        ctx.moveTo(cx, py + 2);
+        ctx.lineTo(lx, cy - ph * 0.05);
+        ctx.stroke();
+      }
+      // Door
+      ctx.fillStyle = '#3d1f0a';
+      ctx.beginPath();
+      ctx.arc(cx, cy + ph * 0.25, TS * 0.3, Math.PI, 0);
+      ctx.fill();
+
+    } else if (shape === 'tower') {
+      // ── Tower ──
+      const towerW = pw * 0.55;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(cx - towerW / 2, py + 12, towerW, ph - 12);
+      // Crenellations
+      ctx.fillStyle = this._adj(b.color, 10);
+      for (let i = 0; i < 4; i++) {
+        ctx.fillRect(cx - towerW / 2 + i * (towerW / 3), py + 8, towerW / 5, 8);
+      }
+      // Windows
+      ctx.fillStyle = '#4a6a8a';
+      ctx.fillRect(cx - 4, py + ph * 0.3, 8, 10);
+      ctx.fillRect(cx - 4, py + ph * 0.55, 8, 10);
+      // Door
+      ctx.fillStyle = '#3d1f0a';
+      ctx.fillRect(cx - TS * 0.3, py + ph - TS * 0.6, TS * 0.6, TS * 0.6);
+
+    } else if (shape === 'monument') {
+      // ── Monument / Statue ──
+      // Pedestal
+      ctx.fillStyle = this._adj(b.color, -15);
+      ctx.fillRect(px + 4, py + ph * 0.6, pw - 8, ph * 0.4);
+      ctx.fillRect(px, py + ph - 8, pw, 8);
+      // Abstract figure on top
+      ctx.fillStyle = b.color;
+      ctx.fillRect(cx - pw * 0.15, py + ph * 0.15, pw * 0.3, ph * 0.5);
+      // Head
+      ctx.beginPath();
+      ctx.arc(cx, py + ph * 0.12, pw * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else {
+      // ── Fallback: draw as default building ──
+      this._drawDefaultBuilding(ctx, b);
+    }
+
+    ctx.restore();
+  }
+
+  // Default building rendering (extracted from original _drawBuilding)
+  _drawDefaultBuilding(ctx, b) {
+    const TS = TILE_SIZE;
+    const px = b.x * TS, py = b.y * TS;
+    const pw = b.w * TS, ph = b.h * TS;
+    const roofH = Math.min(TS * 2, ph * 0.45);
+    ctx.fillStyle = b.roofColor;
+    ctx.fillRect(px - 4, py, pw + 8, roofH);
+    ctx.fillStyle = b.color;
+    ctx.fillRect(px, py + roofH, pw, ph - roofH);
+    const doorCol = Math.floor(b.w / 2);
+    ctx.fillStyle = '#3d1f0a';
+    ctx.fillRect(px + doorCol * TS + 4, py + ph - TS + 4, TS - 8, TS - 4);
+  }
+
+  // ─── Special shapes (non-building: planets, orbs, arenas from specialShapes) ──
+  _drawSpecialShape(ctx, shape) {
+    const TS = TILE_SIZE;
+    const scx = shape.x * TS + TS / 2;
+    const scy = shape.y * TS + TS / 2;
+    const type = (shape.type || 'circle').toLowerCase();
+    const fill = shape.fill || '#6b8cae';
+    const stroke = shape.stroke || null;
+
+    ctx.save();
+
+    if (type === 'circle') {
+      const r = shape.radius * TS;
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(scx, scy, r, 0, Math.PI * 2);
+      ctx.fill();
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; ctx.stroke(); }
+    } else if (type === 'ellipse') {
+      const rx = shape.radiusX * TS;
+      const ry = shape.radiusY * TS;
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.ellipse(scx, scy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; ctx.stroke(); }
+    } else if (type === 'ring') {
+      const inner = shape.innerRadius * TS;
+      const outer = shape.outerRadius * TS;
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(scx, scy, outer, 0, Math.PI * 2);
+      ctx.arc(scx, scy, inner, Math.PI * 2, 0, true);
+      ctx.fill();
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+    } else if (type === 'polygon') {
+      const sides = Math.max(3, shape.sides);
+      const pr = shape.radius * TS;
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      for (let i = 0; i <= sides; i++) {
+        const a = (i / sides) * Math.PI * 2 - Math.PI / 2;
+        const ppx = scx + Math.cos(a) * pr;
+        const ppy = scy + Math.sin(a) * pr;
+        if (i === 0) ctx.moveTo(ppx, ppy); else ctx.lineTo(ppx, ppy);
+      }
+      ctx.closePath();
+      ctx.fill();
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+    }
+
+    // Label
+    if (shape.label) {
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 10px "Press Start 2P", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(shape.label, scx, scy - shape.radius * TS - 8);
+    }
+
+    ctx.restore();
   }
 
   // ─── Entity ─────────────────────────────────────────────────────

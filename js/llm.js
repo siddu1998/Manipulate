@@ -4,6 +4,12 @@ export class LLM {
     this.keys = { openai: '', anthropic: '', gemini: '', grok: '' };
     this.provider = 'openai';
     this.load();
+
+    // ★ API health tracking
+    this.apiErrors = [];        // recent errors [{time, provider, status, message}]
+    this.maxErrorLog = 50;      // keep last 50 errors
+    this.totalCalls = 0;
+    this.totalErrors = 0;
   }
 
   load() {
@@ -60,11 +66,56 @@ export class LLM {
 
     if (!handler) throw new Error(`Unknown provider: ${this.provider}`);
 
-    const text = await handler();
-    if (json) {
-      return this._parseJSON(text);
+    this.totalCalls++;
+    try {
+      const text = await handler();
+      if (json) {
+        return this._parseJSON(text);
+      }
+      return text;
+    } catch (err) {
+      this._logApiError(err);
+      throw err;
     }
-    return text;
+  }
+
+  // ★ Log API errors with context for debugging
+  _logApiError(err) {
+    this.totalErrors++;
+    const entry = {
+      time: new Date().toISOString(),
+      provider: this.provider,
+      message: err.message || String(err),
+      isRateLimit: /rate.limit|429|quota|too.many/i.test(err.message),
+      isTimeout: /timeout|timed.out|network|fetch/i.test(err.message),
+    };
+    this.apiErrors.push(entry);
+    if (this.apiErrors.length > this.maxErrorLog) this.apiErrors.shift();
+
+    // ★ Prominent console logging with error type classification
+    const errorType = entry.isRateLimit ? '⚠️ RATE LIMITED' : entry.isTimeout ? '⏱️ TIMEOUT' : '❌ API ERROR';
+    console.error(`[LLM ${errorType}] ${this.provider}: ${err.message} (${this.totalErrors}/${this.totalCalls} calls failed)`);
+  }
+
+  // ★ Check if API is currently rate-limited (for callers to check before making calls)
+  isRateLimited() {
+    const recentErrors = this.apiErrors.filter(e => Date.now() - new Date(e.time).getTime() < 30000);
+    return recentErrors.filter(e => e.isRateLimit).length >= 2;
+  }
+
+  // ★ Get error stats for UI/debugging
+  getApiHealth() {
+    const last30s = this.apiErrors.filter(e => Date.now() - new Date(e.time).getTime() < 30000);
+    const last5m = this.apiErrors.filter(e => Date.now() - new Date(e.time).getTime() < 300000);
+    return {
+      totalCalls: this.totalCalls,
+      totalErrors: this.totalErrors,
+      errorRate: this.totalCalls > 0 ? (this.totalErrors / this.totalCalls * 100).toFixed(1) + '%' : '0%',
+      recentErrors30s: last30s.length,
+      recentErrors5m: last5m.length,
+      isRateLimited: this.isRateLimited(),
+      lastError: this.apiErrors.length > 0 ? this.apiErrors[this.apiErrors.length - 1] : null,
+    };
   }
 
   // ─── Chat method (multi-turn) ───────────────────────────────────
@@ -100,8 +151,12 @@ export class LLM {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`OpenAI ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
     return data.choices[0].message.content;
   }
 
@@ -112,8 +167,12 @@ export class LLM {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({ model: 'gpt-4o-mini', messages: msgs, temperature: temp, max_tokens: maxTokens }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`OpenAI ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
     return data.choices[0].message.content;
   }
 
@@ -136,8 +195,12 @@ export class LLM {
       },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Anthropic ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Anthropic: ${data.error.message}`);
     return data.content[0].text;
   }
 
@@ -154,8 +217,12 @@ export class LLM {
         model: 'claude-sonnet-4-20250514', max_tokens: maxTokens, system, messages, temperature: temp,
       }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Anthropic ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Anthropic: ${data.error.message}`);
     return data.content[0].text;
   }
 
@@ -171,8 +238,12 @@ export class LLM {
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
     );
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Gemini ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Gemini: ${data.error.message}`);
     return data.candidates[0].content.parts[0].text;
   }
 
@@ -193,8 +264,12 @@ export class LLM {
         }),
       }
     );
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Gemini ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Gemini: ${data.error.message}`);
     return data.candidates[0].content.parts[0].text;
   }
 
@@ -214,8 +289,12 @@ export class LLM {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Grok ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Grok: ${data.error.message}`);
     return data.choices[0].message.content;
   }
 
@@ -226,8 +305,12 @@ export class LLM {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({ model: 'grok-3-mini-fast', messages: msgs, temperature: temp, max_tokens: maxTokens }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(`Grok ${res.status}: ${data.error?.message || res.statusText}`);
+    }
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
+    if (data.error) throw new Error(`Grok: ${data.error.message}`);
     return data.choices[0].message.content;
   }
 

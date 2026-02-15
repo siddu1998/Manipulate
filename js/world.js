@@ -34,14 +34,40 @@ const BUILDING_PALETTES = {
   industrial: [['#555','#333'],['#6b6b6b','#444'],['#808080','#4a4a4a'],['#607D8B','#37474F']],
   colorful:   [['#e74c3c','#c0392b'],['#3498db','#2980b9'],['#2ecc71','#27ae60'],['#f39c12','#e67e22'],['#9b59b6','#8e44ad']],
   natural:    [['#8B7355','#6b5335'],['#d4a574','#a0785a'],['#f4a460','#cd853f'],['#9a7b4f','#6b5335']],
+  // ─── Culture-aware palettes ──────────────────────────────────────
+  egyptian:   [['#c4a574','#8B7355'],['#d4c5a0','#b0a080'],['#e8d5b0','#c4a574'],['#daa520','#b8860b'],['#f5f0e0','#d4c5a0']],
+  indian:     [['#e8d5b0','#c9a227'],['#c0392b','#962d22'],['#f5f5dc','#d4c5a0'],['#ff6347','#cc4f39'],['#daa520','#b8860b']],
+  japanese:   [['#8b0000','#4a0000'],['#2c2c2c','#1a1a1a'],['#f5f5dc','#d4c5a0'],['#bc8f8f','#8b6969'],['#556b2f','#3b4a20']],
+  chinese:    [['#c0392b','#8b0000'],['#daa520','#b8860b'],['#2c2c2c','#1a1a1a'],['#e8d5b0','#c9a227'],['#8b0000','#5a0000']],
+  greek:      [['#f5f5f5','#ccc'],['#e0d8c8','#b8b0a0'],['#87ceeb','#5a9bbe'],['#d4c5a0','#b0a080'],['#ddd','#aaa']],
+  roman:      [['#d4c5a0','#b0a080'],['#f5f5f5','#ccc'],['#c0392b','#962d22'],['#8B7355','#6b5335'],['#BDB76B','#8b864e']],
+  arabian:    [['#e8d5b0','#c9a227'],['#f0e6d0','#d4c5a0'],['#1a6b5a','#0d4a3a'],['#daa520','#b8860b'],['#2e86c1','#1a5276']],
+  african:    [['#b5884a','#8B6914'],['#c0392b','#962d22'],['#d4a574','#a0785a'],['#8B7355','#6b5335'],['#daa520','#b8860b']],
+  mesoamerican:[['#808040','#606030'],['#c4a574','#8B7355'],['#2ecc71','#1a9a52'],['#b0a080','#8a7a5a'],['#556b2f','#3b4a20']],
+  nordic:     [['#8B7355','#6b5335'],['#2c3e50','#1a2836'],['#607D8B','#37474F'],['#b5651d','#8B4513'],['#ddd','#999']],
+  scifi:      [['#1A237E','#0D1B6F'],['#006064','#004050'],['#311B92','#200A6F'],['#00BCD4','#0097A7'],['#4DB6AC','#2E7D67']],
+  fantasy:    [['#9b59b6','#8e44ad'],['#3498db','#2980b9'],['#2ecc71','#27ae60'],['#e8d5b0','#b8860b'],['#daa520','#b8860b']],
 };
 
 function buildThemeConfig(desc) {
   const v = desc.visual || {};
+  const culture = (desc.culture || '').toLowerCase();
   const ground = GROUND_MAP[v.ground] || GROUND_MAP.grass;
   const path = PATH_MAP[v.paths] || TILE.PATH_CROSS;
   const veg = VEGETATION_PRESETS[v.vegetation] || VEGETATION_PRESETS.moderate;
-  const palette = BUILDING_PALETTES[v.buildingStyle] || BUILDING_PALETTES.rustic;
+
+  // Culture-aware palette: prefer culture palette, then buildingStyle, then rustic
+  let palette = BUILDING_PALETTES[v.buildingStyle] || BUILDING_PALETTES.rustic;
+  if (culture) {
+    for (const [key, pal] of Object.entries(BUILDING_PALETTES)) {
+      if (culture.includes(key) || key.includes(culture)) { palette = pal; break; }
+    }
+  }
+  // Also check if architect set a specific palette name
+  if (v.culturePalette && BUILDING_PALETTES[v.culturePalette]) {
+    palette = BUILDING_PALETTES[v.culturePalette];
+  }
+
   const accent = veg.tiles[veg.tiles.length > 2 ? 2 : 0] || TILE.BENCH;
 
   return {
@@ -53,6 +79,8 @@ function buildThemeConfig(desc) {
     buildingPalette: palette,
     primaryColor: v.palette?.primary || null,
     secondaryColor: v.palette?.secondary || null,
+    culture,
+    roadLayout: v.roadLayout || 'cross',
   };
 }
 
@@ -63,9 +91,11 @@ export class World {
     this.tiles = [];
     this.collision = [];
     this.buildings = [];
+    this.specialShapes = [];   // Parametric shapes (planets, orbs, arenas, etc.)
     this.name = '';
     this.description = '';
     this.theme = 'village';
+    this.culture = '';
     this.npcSpawnPoints = [];
     this.playerSpawn = { x: 32, y: 24 };
     this.environmentTree = null;  // Hierarchical environment tree (paper Section 5.1)
@@ -75,8 +105,9 @@ export class World {
   buildFromDescription(desc) {
     this.name = desc.name || 'Unknown World';
     this.description = desc.description || '';
+    this.culture = (desc.culture || '').toLowerCase();
 
-    // ★ Build theme config dynamically from LLM visual properties
+    // ★ Build theme config dynamically from LLM visual properties + culture
     const themeConfig = buildThemeConfig(desc);
     this.themeConfig = themeConfig;
 
@@ -91,25 +122,28 @@ export class World {
     // Step 1: Add terrain zones
     this._addTerrainZones(desc.areas || [], themeConfig);
 
-    // Step 2: Build road network
+    // Step 2: Build road network (culture-aware layout)
     this._buildRoads(themeConfig);
 
-    // Step 3: Place buildings
+    // Step 3: Place buildings (with parametric shape support)
     this._placeBuildings(desc.buildings || []);
 
     // Step 4: Add theme-appropriate decorations
     this._addDecorations(themeConfig);
 
-    // Step 5: Set player spawn at a path tile near center
+    // Step 5: Normalize and store parametric special shapes (planets, orbs, etc.)
+    this.specialShapes = this._normalizeSpecialShapes(desc.specialShapes || []);
+
+    // Step 6: Set player spawn at a path tile near center
     this._setPlayerSpawn();
 
-    // Step 6: Set NPC spawn points near their assigned buildings
+    // Step 7: Set NPC spawn points near their assigned buildings
     this._setNpcSpawns(desc.characters || []);
 
-    // Update collision map
+    // Update collision map (includes parametric building collision)
     this._updateCollision();
 
-    // Step 7: Build hierarchical environment tree (paper Section 5.1)
+    // Step 8: Build hierarchical environment tree (paper Section 5.1)
     this.environmentTree = new EnvironmentTree(this.name);
     this.environmentTree.buildFromWorld(this.buildings, desc.areas || []);
   }
@@ -119,19 +153,23 @@ export class World {
     for (const area of areas) {
       const type = (area.type || '').toLowerCase();
       let tileType;
-      if (type.includes('forest') || type.includes('wood')) tileType = 'forest';
-      else if (type.includes('water') || type.includes('lake') || type.includes('river') || type.includes('pond') || type.includes('pool')) tileType = 'water';
+      if (type.includes('forest') || type.includes('wood') || type.includes('jungle')) tileType = 'forest';
+      else if (type.includes('water') || type.includes('lake') || type.includes('river') || type.includes('pond') || type.includes('pool') || type.includes('nile') || type.includes('oasis')) tileType = 'water';
       else if (type.includes('park') || type.includes('garden') || type.includes('courtyard') || type.includes('green') || type.includes('lounge')) tileType = 'park';
-      else if (type.includes('desert') || type.includes('beach') || type.includes('sand')) tileType = 'sand';
-      else if (type.includes('parking') || type.includes('lot') || type.includes('concrete') || type.includes('plaza')) tileType = 'paved';
+      else if (type.includes('desert') || type.includes('beach') || type.includes('sand') || type.includes('dune') || type.includes('wasteland')) tileType = 'sand';
+      else if (type.includes('parking') || type.includes('lot') || type.includes('concrete') || type.includes('plaza') || type.includes('square')) tileType = 'paved';
       else if (type.includes('lobby') || type.includes('hall') || type.includes('atrium') || type.includes('floor')) tileType = 'indoor';
+      else if (type.includes('ruins') || type.includes('ruin') || type.includes('ancient') || type.includes('excavation')) tileType = 'ruins';
+      else if (type.includes('rocky') || type.includes('mountain') || type.includes('cliff') || type.includes('canyon') || type.includes('quarry')) tileType = 'rocky';
+      else if (type.includes('farm') || type.includes('field') || type.includes('crop') || type.includes('plantation')) tileType = 'farm';
+      else if (type.includes('swamp') || type.includes('marsh') || type.includes('bog')) tileType = 'swamp';
       else continue;
 
-      // Place zone in a random quadrant-ish area
-      const zw = 8 + (rng() * 10) | 0;
-      const zh = 6 + (rng() * 8) | 0;
-      const zx = (rng() * (this.cols - zw - 4)) | 0 + 2;
-      const zy = (rng() * (this.rows - zh - 4)) | 0 + 2;
+      // Place zone — use area position hints if provided, otherwise random
+      const zw = area.w || (8 + (rng() * 10) | 0);
+      const zh = area.h || (6 + (rng() * 8) | 0);
+      const zx = area.x != null ? area.x : ((rng() * (this.cols - zw - 4)) | 0) + 2;
+      const zy = area.y != null ? area.y : ((rng() * (this.rows - zh - 4)) | 0) + 2;
 
       for (let y = zy; y < zy + zh && y < this.rows; y++) {
         for (let x = zx; x < zx + zw && x < this.cols; x++) {
@@ -147,6 +185,28 @@ export class World {
             this.tiles[y][x] = rng() > 0.1 ? TILE.FLOOR_STONE : TILE.BENCH;
           } else if (tileType === 'indoor') {
             this.tiles[y][x] = rng() > 0.05 ? TILE.FLOOR_WOOD : TILE.LAMP;
+          } else if (tileType === 'ruins') {
+            // Broken stone, scattered rocks, sand patches
+            const r = rng();
+            if (r < 0.3) this.tiles[y][x] = TILE.FLOOR_STONE;
+            else if (r < 0.5) this.tiles[y][x] = TILE.ROCK;
+            else if (r < 0.7) this.tiles[y][x] = TILE.SAND;
+            else this.tiles[y][x] = TILE.FLOOR_STONE;
+          } else if (tileType === 'rocky') {
+            const r = rng();
+            if (r < 0.4) this.tiles[y][x] = TILE.ROCK;
+            else if (r < 0.7) this.tiles[y][x] = TILE.SAND;
+            else this.tiles[y][x] = TILE.FLOOR_STONE;
+          } else if (tileType === 'farm') {
+            const r = rng();
+            if (r < 0.5) this.tiles[y][x] = TILE.GRASS_DARK;
+            else if (r < 0.8) this.tiles[y][x] = TILE.GRASS;
+            else this.tiles[y][x] = TILE.GRASS_FLOWER;
+          } else if (tileType === 'swamp') {
+            const r = rng();
+            if (r < 0.3) this.tiles[y][x] = TILE.WATER;
+            else if (r < 0.5) this.tiles[y][x] = TILE.GRASS_DARK;
+            else this.tiles[y][x] = TILE.BUSH;
           }
         }
       }
@@ -156,30 +216,85 @@ export class World {
   _buildRoads(themeConfig) {
     const cx = this.cols >> 1;
     const cy = this.rows >> 1;
+    const layout = themeConfig.roadLayout || 'cross';
 
-    // Main horizontal road
-    for (let x = 4; x < this.cols - 4; x++) {
-      this._setPath(x, cy);
-      this._setPath(x, cy + 1);
-    }
-    // Main vertical road
-    for (let y = 4; y < this.rows - 4; y++) {
-      this._setPath(cx, y);
-      this._setPath(cx + 1, y);
-    }
-    // Cross streets
-    const offsets = [-12, -6, 6, 12];
-    for (const off of offsets) {
-      const sx = cx + off;
-      const sy = cy + off;
-      if (sx > 4 && sx < this.cols - 4) {
-        for (let y = Math.max(4, cy - 16); y < Math.min(this.rows - 4, cy + 16); y++) {
-          this._setPath(sx, y);
+    if (layout === 'radial' || layout === 'circular') {
+      // Circular plaza with radial roads — great for Egyptian, Indian, ancient layouts
+      const plazaR = 4;
+      for (let dy = -plazaR; dy <= plazaR; dy++) {
+        for (let dx = -plazaR; dx <= plazaR; dx++) {
+          if (dx * dx + dy * dy <= plazaR * plazaR) {
+            this._setPath(cx + dx, cy + dy);
+          }
         }
       }
-      if (sy > 4 && sy < this.rows - 4) {
-        for (let x = Math.max(4, cx - 16); x < Math.min(this.cols - 4, cx + 16); x++) {
-          this._setPath(x, sy);
+      // Radial spokes
+      const spokes = 6;
+      for (let i = 0; i < spokes; i++) {
+        const angle = (i / spokes) * Math.PI * 2;
+        for (let d = plazaR; d < 22; d++) {
+          const px = Math.round(cx + Math.cos(angle) * d);
+          const py = Math.round(cy + Math.sin(angle) * d);
+          if (px > 2 && px < this.cols - 2 && py > 2 && py < this.rows - 2) {
+            this._setPath(px, py);
+          }
+        }
+      }
+      // Outer ring
+      const ringR = 16;
+      for (let a = 0; a < 360; a += 2) {
+        const rad = (a / 180) * Math.PI;
+        const px = Math.round(cx + Math.cos(rad) * ringR);
+        const py = Math.round(cy + Math.sin(rad) * ringR);
+        if (px > 2 && px < this.cols - 2 && py > 2 && py < this.rows - 2) {
+          this._setPath(px, py);
+        }
+      }
+    } else if (layout === 'organic') {
+      // Meandering paths — good for villages, jungles
+      const rng = this._rng(999);
+      let px = cx, py = 4;
+      while (py < this.rows - 4) {
+        this._setPath(px, py);
+        this._setPath(px + 1, py);
+        py++;
+        if (rng() < 0.3) px += rng() > 0.5 ? 1 : -1;
+        px = Math.max(4, Math.min(this.cols - 4, px));
+      }
+      let px2 = 4, py2 = cy;
+      while (px2 < this.cols - 4) {
+        this._setPath(px2, py2);
+        this._setPath(px2, py2 + 1);
+        px2++;
+        if (rng() < 0.3) py2 += rng() > 0.5 ? 1 : -1;
+        py2 = Math.max(4, Math.min(this.rows - 4, py2));
+      }
+    } else {
+      // Default: cross layout (original)
+      // Main horizontal road
+      for (let x = 4; x < this.cols - 4; x++) {
+        this._setPath(x, cy);
+        this._setPath(x, cy + 1);
+      }
+      // Main vertical road
+      for (let y = 4; y < this.rows - 4; y++) {
+        this._setPath(cx, y);
+        this._setPath(cx + 1, y);
+      }
+      // Cross streets
+      const offsets = [-12, -6, 6, 12];
+      for (const off of offsets) {
+        const sx = cx + off;
+        const sy = cy + off;
+        if (sx > 4 && sx < this.cols - 4) {
+          for (let y = Math.max(4, cy - 16); y < Math.min(this.rows - 4, cy + 16); y++) {
+            this._setPath(sx, y);
+          }
+        }
+        if (sy > 4 && sy < this.rows - 4) {
+          for (let x = Math.max(4, cx - 16); x < Math.min(this.cols - 4, cx + 16); x++) {
+            this._setPath(x, sy);
+          }
         }
       }
     }
@@ -219,17 +334,29 @@ export class World {
     const cy = this.rows >> 1;
     const placed = [];
 
-    for (let i = 0; i < buildings.length; i++) {
-      const bDef = buildings[i];
+    // Sort: landmarks first (placed closer to center), then regular buildings
+    const sorted = [...buildings].map((b, i) => ({ ...b, _idx: i }));
+    sorted.sort((a, b) => (b.landmark ? 1 : 0) - (a.landmark ? 1 : 0));
+
+    for (let si = 0; si < sorted.length; si++) {
+      const bDef = sorted[si];
       const bType = this._matchBuildingType(bDef.type || 'house');
-      const bw = bType.w;
-      const bh = bType.h;
+
+      // Shape can come from bDef.shape, bDef.shapeSpec, or bType.shape
+      const shape = bDef.shape || bType.shape || null;
+
+      const bw = bDef.w || bType.w;
+      const bh = bDef.h || bType.h;
+
+      // Landmarks get placed closer to center
+      const minDist = bDef.landmark ? 2 : 4;
+      const maxDist = bDef.landmark ? 14 : 22;
 
       // Try to place near roads, spiraling out from center
       let bestX = -1, bestY = -1;
-      for (let attempt = 0; attempt < 200; attempt++) {
+      for (let attempt = 0; attempt < 300; attempt++) {
         const angle = rng() * Math.PI * 2;
-        const dist = 4 + rng() * 20;
+        const dist = minDist + rng() * maxDist;
         const tx = (cx + Math.cos(angle) * dist - bw / 2) | 0;
         const ty = (cy + Math.sin(angle) * dist - bh / 2) | 0;
 
@@ -241,18 +368,21 @@ export class World {
       }
 
       if (bestX >= 0) {
-        // Use the dynamic theme palette for building colors
-        let color = bType.color;
-        let roofColor = bType.roofColor;
+        // Per-building colors: prefer bDef.color, then palette, then bType default
+        let color = bDef.color || bType.color;
+        let roofColor = bDef.roofColor || bType.roofColor;
         const palette = this.themeConfig?.buildingPalette;
-        if (palette && palette.length > 0) {
-          const [pc, pr] = palette[i % palette.length];
+        if (!bDef.color && palette && palette.length > 0) {
+          const [pc, pr] = palette[si % palette.length];
           color = pc;
           roofColor = pr;
         }
+
         const building = {
-          name: bDef.name || `Building ${i}`,
+          name: bDef.name || `Building ${si}`,
           type: bDef.type || 'house',
+          shape: shape,
+          landmark: bDef.landmark || false,
           x: bestX,
           y: bestY,
           w: bw,
@@ -262,13 +392,24 @@ export class World {
         };
         this.buildings.push(building);
         placed.push(building);
-        this._stampBuilding(building);
+
+        // Only stamp tile grid for default-shape buildings
+        if (!shape || shape === 'default') {
+          this._stampBuilding(building);
+        } else {
+          // For parametric shapes, fill the footprint with walkable floor
+          this._stampParametricFootprint(building);
+        }
       }
     }
   }
 
   _matchBuildingType(type) {
     const t = type.toLowerCase();
+    // Check landmark/special types first (pyramid, dome, etc.)
+    for (const [key, val] of Object.entries(BUILDING_TYPES)) {
+      if (t === key) return val;
+    }
     for (const [key, val] of Object.entries(BUILDING_TYPES)) {
       if (t.includes(key)) return val;
     }
@@ -276,7 +417,29 @@ export class World {
     if (t.includes('bar') || t.includes('pub') || t.includes('tavern')) return BUILDING_TYPES.tavern;
     if (t.includes('store') || t.includes('shop')) return BUILDING_TYPES.shop;
     if (t.includes('home') || t.includes('house') || t.includes('cottage')) return BUILDING_TYPES.house;
+    if (t.includes('tomb') || t.includes('mausoleum') || t.includes('shrine')) return BUILDING_TYPES.temple;
+    if (t.includes('monument') || t.includes('statue') || t.includes('memorial')) return BUILDING_TYPES.monument;
+    if (t.includes('palace') || t.includes('manor') || t.includes('mansion')) return BUILDING_TYPES.palace;
     return BUILDING_TYPES.house;
+  }
+
+  // Fill footprint for parametric-shaped buildings (walkable base, no tile stamping)
+  _stampParametricFootprint(b) {
+    for (let dy = 0; dy < b.h; dy++) {
+      for (let dx = 0; dx < b.w; dx++) {
+        const tx = b.x + dx, ty = b.y + dy;
+        if (ty >= 0 && ty < this.rows && tx >= 0 && tx < this.cols) {
+          // Make the footprint sand/stone (looks like a foundation)
+          this.tiles[ty][tx] = TILE.FLOOR_STONE;
+        }
+      }
+    }
+    // Door tile
+    const doorX = b.x + (b.w >> 1);
+    const doorY = b.y + b.h;
+    if (doorY < this.rows) {
+      this.tiles[doorY][doorX] = TILE.PATH_CROSS;
+    }
   }
 
   _canPlaceBuilding(x, y, w, h, placed) {
@@ -441,10 +604,40 @@ export class World {
     }
   }
 
+  _normalizeSpecialShapes(shapes) {
+    return (shapes || []).map(s => ({
+      type: (s.type || 'circle').toLowerCase(),
+      x: s.x ?? (this.cols >> 1),
+      y: s.y ?? (this.rows >> 1),
+      radius: s.radius ?? 2,
+      radiusX: s.radiusX ?? s.radius ?? 2,
+      radiusY: s.radiusY ?? s.radius ?? 2,
+      innerRadius: s.innerRadius ?? 1,
+      outerRadius: s.outerRadius ?? s.radius ?? 2,
+      sides: s.sides ?? 6,
+      fill: s.fill || '#6b8cae',
+      stroke: s.stroke || null,
+      label: s.label || s.name || '',
+    }));
+  }
+
   _updateCollision() {
     for (let y = 0; y < this.rows; y++) {
       for (let x = 0; x < this.cols; x++) {
         this.collision[y][x] = SOLID_TILES.has(this.tiles[y][x]);
+      }
+    }
+    // Parametric-shaped buildings: mark edges as solid, interior walkable
+    for (const b of this.buildings) {
+      if (!b.shape || b.shape === 'default') continue;
+      for (let dy = 0; dy < b.h; dy++) {
+        for (let dx = 0; dx < b.w; dx++) {
+          const tx = b.x + dx, ty = b.y + dy;
+          if (ty < 0 || ty >= this.rows || tx < 0 || tx >= this.cols) continue;
+          // Only block the outer edge so NPCs can walk through the interior
+          const isEdge = dy === 0 || dy === b.h - 1 || dx === 0 || dx === b.w - 1;
+          if (isEdge) this.collision[ty][tx] = true;
+        }
       }
     }
   }

@@ -276,6 +276,22 @@ const BUILDING_ROOM_TEMPLATES = {
   castle:     ['throne room', 'armory', 'tower'],
   stable:     ['stalls', 'tack room', 'hay loft'],
   fountain:   [],
+  // ─── Landmark / parametric building rooms ──────────────────
+  pyramid:    ['burial chamber', 'treasure room', 'passage'],
+  dome:       ['main hall', 'inner sanctum', 'garden courtyard'],
+  obelisk:    [],
+  minaret:    ['prayer platform', 'stairwell'],
+  step_pyramid: ['ceremonial chamber', 'altar room'],
+  pagoda:     ['prayer hall', 'meditation level', 'bell tower'],
+  colosseum:  ['arena floor', 'stands', 'gladiator quarters'],
+  tent:       ['main area', 'sleeping quarters'],
+  hut:        ['living area'],
+  tower:      ['lookout', 'guard room', 'armory'],
+  monument:   [],
+  palace:     ['throne room', 'audience hall', 'royal garden', 'private quarters'],
+  ziggurat:   ['temple summit', 'offering chamber'],
+  sphinx:     [],
+  barracks:   ['training ground', 'bunks', 'armory'],
 };
 
 // ═══════════════════════════════════════════════════════════════════

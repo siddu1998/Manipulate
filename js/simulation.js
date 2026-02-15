@@ -280,8 +280,8 @@ export function simulationTick(agents, worldState, gameTime) {
     const s = agent.sim;
     const traits = s.traits;
 
-    // 1. NEEDS DECAY (skip frozen fields) — hunger slower so conversations aren't always about food
-    if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.001);
+    // 1. NEEDS DECAY (skip frozen fields) — hunger much slower so conversations aren't always about food
+    if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.0004);
     if (!isFrozen(s, 'needs.rest'))    s.needs.rest    = clamp01(s.needs.rest + 0.002);
     if (!isFrozen(s, 'needs.social'))  s.needs.social  = clamp01(s.needs.social + (traits.introversion > 0.6 ? 0.001 : 0.004));
     if (!isFrozen(s, 'needs.fun'))     s.needs.fun     = clamp01(s.needs.fun + 0.002);
@@ -289,10 +289,10 @@ export function simulationTick(agents, worldState, gameTime) {
     if (!isFrozen(s, 'needs.romance')) s.needs.romance = clamp01(s.needs.romance + (traits.romantic > 0.5 ? 0.002 : 0.0005));
 
     // 2. STATUS EFFECTS
-    // Hunger affects health and happiness
-    if (s.needs.hunger > 0.8) {
+    // Hunger affects health and happiness (only when truly starving)
+    if (s.needs.hunger > 0.9) {
       s.status.health = Math.max(0, s.status.health - 0.1);
-      s.status.happiness = Math.max(0, s.status.happiness - 0.2);
+      s.status.happiness = Math.max(0, s.status.happiness - 0.15);
     }
     // Loneliness affects happiness
     if (s.needs.social > 0.7) {
@@ -346,11 +346,11 @@ export function simulationTick(agents, worldState, gameTime) {
     // ★ 6. COGNITIVE BRIDGE — generate awareness events when state crosses thresholds
     // These become observations in the agent's memory stream via app.js
 
-    // ── Distress alerts (need is HIGH) — hunger alert only when very hungry so it doesn't dominate conversation
-    if (s.needs.hunger > 0.88 && !agent._lastHungerAlert) {
-      events.push({ type: 'awareness', agent: agent.name, text: `I'm getting really hungry. I need to find food soon.`, importance: 6 });
+    // ── Distress alerts (need is HIGH) — hunger alert only when truly starving
+    if (s.needs.hunger > 0.93 && !agent._lastHungerAlert) {
+      events.push({ type: 'awareness', agent: agent.name, text: `I'm starving. I must find food.`, importance: 6 });
       agent._lastHungerAlert = true;
-    } else if (s.needs.hunger < 0.35) { agent._lastHungerAlert = false; }
+    } else if (s.needs.hunger < 0.4) { agent._lastHungerAlert = false; }
 
     if (s.needs.rest > 0.8 && !agent._lastRestAlert) {
       events.push({ type: 'awareness', agent: agent.name, text: `I'm exhausted. I need to rest.`, importance: 5 });
@@ -369,9 +369,9 @@ export function simulationTick(agents, worldState, gameTime) {
 
     // ── Satisfaction alerts (need was HIGH, now LOW — agent notices relief) ──
     if (s.needs.hunger < 0.15 && agent._wasHungry) {
-      events.push({ type: 'awareness', agent: agent.name, text: `I feel full and satisfied. No more hunger.`, importance: 4 });
+      events.push({ type: 'awareness', agent: agent.name, text: `I feel full and satisfied.`, importance: 3 });
       agent._wasHungry = false;
-    } else if (s.needs.hunger > 0.6) { agent._wasHungry = true; }
+    } else if (s.needs.hunger > 0.85) { agent._wasHungry = true; }
 
     if (s.needs.rest < 0.15 && agent._wasTired) {
       events.push({ type: 'awareness', agent: agent.name, text: `I feel well-rested and energized!`, importance: 4 });
@@ -385,12 +385,13 @@ export function simulationTick(agents, worldState, gameTime) {
   }
 
   // ★ 7. WORLD-LEVEL AWARENESS — generate observations about world crises
-  if (worldState.resources.food < agents.length * 2 && !worldState._foodCrisisAlerted) {
+  //   Raised threshold so food crisis doesn't fire as easily
+  if (worldState.resources.food < agents.length * 1 && !worldState._foodCrisisAlerted) {
     worldState._foodCrisisAlerted = true;
     for (const agent of agents) {
-      events.push({ type: 'world_awareness', agent: agent.name, text: `The village food supply is critically low. People are going hungry.`, importance: 8 });
+      events.push({ type: 'world_awareness', agent: agent.name, text: `The village is running out of food. We need to act.`, importance: 8 });
     }
-  } else if (worldState.resources.food > agents.length * 5) { worldState._foodCrisisAlerted = false; }
+  } else if (worldState.resources.food > agents.length * 4) { worldState._foodCrisisAlerted = false; }
 
   if (worldState.governance.unrest > 50 && !worldState._unrestAlerted) {
     worldState._unrestAlerted = true;
@@ -409,8 +410,8 @@ export function simulationTick(agents, worldState, gameTime) {
   // ── Update world ──
   // Resource production (skip if user froze the value)
   if (!isFrozen(worldState, 'resources.food')) {
-    worldState.resources.food += worldState.technology.farming * worldState.environment.fertility * 0.1;
-    worldState.resources.food -= agents.length * 0.05;
+    worldState.resources.food += worldState.technology.farming * worldState.environment.fertility * 0.12;
+    worldState.resources.food -= agents.length * 0.025;
   }
 
   // Prosperity
@@ -470,14 +471,14 @@ export function applyConsequence(action, agent, target, worldState, allAgents, a
     case 'eat': {
       if (hasFood(s)) {
         removeItem(s, 'food', 1);
-        s.needs.hunger = Math.max(0, s.needs.hunger - 0.5);
-        s.status.happiness = Math.min(100, s.status.happiness + 2);
-        changes.push(`${agent.name} ate from inventory (hunger -0.5)`);
+        s.needs.hunger = Math.max(0, s.needs.hunger - 0.7);
+        s.status.happiness = Math.min(100, s.status.happiness + 3);
+        changes.push(`${agent.name} ate from inventory (hunger -0.7)`);
       } else if (worldState.resources.food >= 1) {
         worldState.resources.food -= 1;
-        s.needs.hunger = Math.max(0, s.needs.hunger - 0.5);
-        s.status.happiness = Math.min(100, s.status.happiness + 2);
-        changes.push(`${agent.name} ate (hunger -0.5, world food -1)`);
+        s.needs.hunger = Math.max(0, s.needs.hunger - 0.7);
+        s.status.happiness = Math.min(100, s.status.happiness + 3);
+        changes.push(`${agent.name} ate (hunger -0.7, world food -1)`);
       }
       break;
     }

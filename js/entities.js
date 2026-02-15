@@ -186,8 +186,18 @@ export class NPC extends Entity {
       this.addMemory(`I noticed a fire at ${event.location || 'nearby'}! This is dangerous!`, 8);
     } else if (event.type === 'announcement') {
       this.addMemory(`I heard an announcement: "${event.message}"`, 5);
+    } else if (event.type === 'disaster' || event.type === 'crisis') {
+      this.addMemory(`[CRISIS] ${event.description || 'A major event struck the village!'}`, 9);
     } else {
-      this.addMemory(`Something happened nearby: ${event.description || event.type}`, 4);
+      this.addMemory(`Something happened nearby: ${event.description || event.type}`, 5);
+    }
+
+    // ★ Also register in cognitive architecture memory + gossip if available
+    if (this.cognition) {
+      const importance = event.severity === 'catastrophic' ? 9 : event.severity === 'major' ? 8 : 6;
+      const desc = event.description || event.message || event.type;
+      this.cognition.memory.add(`[EVENT] ${desc}`, 'event', importance, null);
+      this.cognition.addHotTopic(desc, 'world event', importance, null);
     }
   }
 
@@ -196,6 +206,7 @@ export class NPC extends Entity {
     const recent = this.perceivedEvents.slice(-5);
     const text = recent.map(e => {
       if (e.type === 'fire') return `There is a FIRE at ${e.location || 'a nearby building'}!`;
+      if (e.type === 'disaster' || e.type === 'crisis') return `CRISIS: ${e.description}`;
       if (e.type === 'announcement') return `Announcement: "${e.message}"`;
       return `Event: ${e.description || e.type}`;
     }).join('\n');

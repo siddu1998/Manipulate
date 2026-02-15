@@ -41,6 +41,7 @@ export class CognitiveArchitecture {
     // ── Conversation state ──
     this.convCooldowns = new Map();
     this.lastConversationTime = 0;
+    this.consecutiveConvFailures = 0;  // Track API failures for backoff
 
     // ═══ GOSSIP / INFORMATION DIFFUSION ═══
     this.hotTopics = [];
@@ -232,18 +233,25 @@ Each memory should be 1 sentence, personal, and specific.
       if (s.children.length > 0) summary += `Children: ${s.children.length}\n`;
 
       // Human-readable feelings (derived from numbers above)
+      // ★ Hunger/rest deliberately excluded — the raw need numbers are already in the summary.
+      //   Including "hungry"/"tired" as words causes the LLM to obsess over food/sleep.
+      //   Only truly extreme states (starving at 0.95) get a feeling word.
       const feelings = [];
-      if (s.needs.hunger > 0.7) feelings.push(s.needs.hunger > 0.9 ? 'starving' : 'hungry');
-      if (s.needs.rest > 0.7) feelings.push(s.needs.rest > 0.9 ? 'exhausted' : 'tired');
+      if (s.needs.hunger > 0.95) feelings.push('starving');
+      if (s.needs.rest > 0.9) feelings.push('exhausted');
       if (s.needs.social > 0.7) feelings.push('lonely');
       if (s.needs.fun > 0.7) feelings.push('bored');
-      if (s.needs.romance > 0.7) feelings.push('longing for romance');
+      if (s.needs.romance > 0.6) feelings.push('longing for connection');
       if (s.needs.safety > 0.5) feelings.push('anxious about safety');
       if (s.status.health < 40) feelings.push('feeling unwell');
-      if (s.status.happiness < 30) feelings.push('unhappy');
-      else if (s.status.happiness > 75) feelings.push('in good spirits');
-      if (s.status.energy < 30) feelings.push('low energy');
+      if (s.status.happiness < 25) feelings.push('unhappy');
+      else if (s.status.happiness > 70) feelings.push('in good spirits');
+      if (s.status.energy < 25) feelings.push('low energy');
       if (s.status.wealth < 10) feelings.push('almost broke');
+      // ★ Add positive/interesting feelings so conversations aren't always about problems
+      if (s.status.happiness > 85) feelings.push('feeling great');
+      if (s.needs.purpose < 0.2) feelings.push('fulfilled');
+      if (s.status.reputation > 70) feelings.push('confident');
       if (feelings.length > 0) {
         summary += `Current feelings: ${feelings.join(', ')}\n`;
       }
@@ -885,24 +893,40 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
       return this._offlineConversation(npc, otherNpc, myGossip, theirGossip, conversationData, gameTime);
     }
 
+    // ★ Adaptive turn count: reduce turns when API has been failing
+    const baseTurns = 8;
+    const adaptiveTurns = this.consecutiveConvFailures > 3
+      ? 2  // minimal conversation when API is stressed
+      : this.consecutiveConvFailures > 1
+        ? 4  // reduced conversation
+        : baseTurns;
+
     try {
       const dialogueHistory = [];
-      // Max 8 turns → up to 16 lines in feed (each turn = agent A line + agent B line). Not hardcoded "16"; feed shows actual line count.
-      const maxTurns = 8; // safety cap; agents can set "end": true to stop earlier
+      const maxTurns = adaptiveTurns;
       let conversationTopic = '';
       let bondChange = 'neutral';
+      let turnFailures = 0; // track per-turn failures within this conversation
 
       for (let turn = 0; turn < maxTurns; turn++) {
         // ── Agent A speaks ──
-        const aUtterance = await this._generateUtterance(
-          npc, otherNpc,
-          this.getAgentSummary(gameTime),
-          myMemoriesAboutThem,
-          myGossip.map(g => g.topic),
-          dialogueHistory,
-          turn === 0, // isInitiator
-          llm, gameTime
-        );
+        let aUtterance;
+        try {
+          aUtterance = await this._generateUtterance(
+            npc, otherNpc,
+            this.getAgentSummary(gameTime),
+            myMemoriesAboutThem,
+            myGossip.map(g => g.topic),
+            dialogueHistory,
+            turn === 0, // isInitiator
+            llm, gameTime
+          );
+        } catch (turnErr) {
+          console.warn(`Conv turn ${turn}A failed:`, turnErr.message);
+          turnFailures++;
+          if (turnFailures >= 2 || dialogueHistory.length === 0) break; // give up after 2 turn failures
+          continue; // skip this turn, try next
+        }
 
         if (!aUtterance || !aUtterance.text) break;
         dialogueHistory.push({ speaker: npc.name, text: aUtterance.text });
@@ -916,16 +940,24 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
         if (aUtterance.end) break;
 
         // ── Agent B speaks ──
-        const bSummary = otherCog ? otherCog.getAgentSummary(gameTime) : `${otherNpc.name}, ${otherNpc.occupation}`;
-        const bUtterance = await this._generateUtterance(
-          otherNpc, npc,
-          bSummary,
-          theirMemoriesAboutMe,
-          theirGossip.map(g => g.topic),
-          dialogueHistory,
-          false, // not initiator
-          llm, gameTime
-        );
+        let bUtterance;
+        try {
+          const bSummary = otherCog ? otherCog.getAgentSummary(gameTime) : `${otherNpc.name}, ${otherNpc.occupation}`;
+          bUtterance = await this._generateUtterance(
+            otherNpc, npc,
+            bSummary,
+            theirMemoriesAboutMe,
+            theirGossip.map(g => g.topic),
+            dialogueHistory,
+            false, // not initiator
+            llm, gameTime
+          );
+        } catch (turnErr) {
+          console.warn(`Conv turn ${turn}B failed:`, turnErr.message);
+          turnFailures++;
+          if (turnFailures >= 2) break;
+          continue;
+        }
 
         if (!bUtterance || !bUtterance.text) break;
         dialogueHistory.push({ speaker: otherNpc.name, text: bUtterance.text });
@@ -938,7 +970,14 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
         if (bUtterance.end) break;
       }
 
-      conversationData.topic = conversationTopic || 'small talk';
+      // ★ If we got at least 1 real line, count it as a success (reset failure counter)
+      if (dialogueHistory.length > 0) {
+        this.consecutiveConvFailures = Math.max(0, this.consecutiveConvFailures - 1);
+        conversationData.topic = conversationTopic || 'small talk';
+      } else {
+        // No lines at all — treat as failure but still do offline fallback below
+        throw new Error('No dialogue generated');
+      }
 
       // ── Phase 3: Post-conversation updates ──
       // Store FULL conversation text in BOTH agents' memories (no truncation!)
@@ -974,15 +1013,11 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
       }
 
     } catch (err) {
-      console.warn('Turn-by-turn conversation failed:', err.message);
-      // Fallback to simple exchange
-      npc.say(`Hey ${otherNpc.name}!`, 3000);
-      setTimeout(() => otherNpc.say(`Oh hi ${npc.name}!`, 3000), 2000);
-      conversationData.lines = [
-        { speaker: npc.name, text: `Hey ${otherNpc.name}!` },
-        { speaker: otherNpc.name, text: `Hi ${npc.name}!` },
-      ];
-      this.memory.add(`Brief greeting with ${otherNpc.name}.`, 'dialogue', 3, gameTime);
+      console.warn('Conversation failed:', err.message);
+      this.consecutiveConvFailures++;
+
+      // ★ RICH FALLBACK instead of boring "Hey/Hi" — use context-aware offline conversation
+      return this._offlineConversation(npc, otherNpc, myGossip, theirGossip, conversationData, gameTime);
     }
 
     this._logAction('conversation', { with: otherNpc.name, topic: conversationData.topic }, gameTime);
@@ -1075,12 +1110,19 @@ ${isInitiator
 Rules:
 - 1-2 sentences only. Sound like a REAL person, not an AI.
 - Use contractions, fragments, casual speech. No "Greetings" or "How wonderful".
-- Your response MUST be shaped by your personality traits and emotional state. A lonely person is warmer. A rivalrous person is prickly. If you're hungry you might mention it in passing, but do NOT make every conversation about food—talk about work, gossip, plans, relationships, events, opinions.
+- Your response MUST be shaped by your personality traits and emotional state. A lonely person is warmer. A rivalrous person is prickly.
+
+TOPIC SELECTION (IMPORTANT — follow this priority):
+1. If you have GOSSIP or NEWS to share, lead with that (30% of conversations should be gossip)
+2. Talk about your WORK, occupation, craft, or what you're currently doing (25%)
+3. Discuss RELATIONSHIPS — ask about someone, comment on a couple, mention your own feelings toward people (20%)
+4. Share OPINIONS about village life, the leader, events, or the future (15%)
+5. Mention personal NEEDS only if truly desperate (hunger > 0.9, rest > 0.9) — otherwise NEVER talk about food or sleep (10%)
+
+- Do NOT talk about food, eating, or hunger unless your hunger need is above 0.9. People don't constantly discuss meals.
 - Consider your RELATIONSHIP numbers: high trust means openness, high rivalry means tension, high attraction means flirting, low familiarity means small talk.
-- Talk about what's on your mind RIGHT NOW: your work, what you just saw, how you're feeling, your plans, your worries, your opinions.
 - Reference previous conversations with this person if relevant — continuity matters.
-- If you have NEWS or GOSSIP, share it naturally.
-- You can ask the other person questions, share opinions, complain, joke, argue, confess, propose, threaten, or reconcile.
+- You can ask questions, share opinions, complain, joke, argue, confess, propose, threaten, or reconcile.
 - React genuinely to what the other person says and what you observe about them.
 - If the conversation has reached a natural endpoint, set "end" to true.
 
@@ -1100,25 +1142,183 @@ Respond as JSON: {"text":"what they say","topic":"main topic (1-2 words)","bond"
     };
   }
 
-  // Offline/demo conversation
+  // Offline/demo conversation — ★ Much richer with context-aware dialogue
   _offlineConversation(npc, otherNpc, myGossip, theirGossip, conversationData, gameTime) {
-    const greetings = [
-      [`Hey ${otherNpc.name}, how's your day?`, `Pretty good ${npc.name}, just ${otherNpc.currentActivity?.toLowerCase() || 'hanging around'}.`],
-      [`${otherNpc.name}! Have you heard the latest?`, `No, what's going on?`],
-      [`Good to see you, ${otherNpc.name}!`, `Likewise! The village is lively today.`],
-    ];
-    const [g1, g2] = greetings[Math.floor(Math.random() * greetings.length)];
-    npc.say(g1, 3500);
-    setTimeout(() => otherNpc.say(g2, 3500), 2500);
-    conversationData.lines = [{ speaker: npc.name, text: g1 }, { speaker: otherNpc.name, text: g2 }];
+    const activity1 = npc.currentActivity?.toLowerCase() || npc.occupation?.toLowerCase() || 'working';
+    const activity2 = otherNpc.currentActivity?.toLowerCase() || otherNpc.occupation?.toLowerCase() || 'working';
+    const rel = this.relationships.get(otherNpc.name);
+    const familiar = rel && rel.familiarity > 3;
+    const timeOfDay = gameTime.hours < 12 ? 'morning' : gameTime.hours < 17 ? 'afternoon' : 'evening';
 
-    // Spread gossip even in demo mode
+    // Build a pool of conversation templates based on context
+    const templates = [];
+
+    // ── Gossip-based (highest priority — there's news to share) ──
+    if (myGossip.length > 0) {
+      const topic = myGossip[0].topic;
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `${otherNpc.name}, have you heard? ${topic}` },
+          { speaker: otherNpc.name, text: `No! Tell me more about that.` },
+          { speaker: npc.name, text: `It's been the talk of the town. I'm still not sure what to make of it.` },
+          { speaker: otherNpc.name, text: `Hmm, that's interesting. I'll keep my ears open.` },
+        ],
+        topic: 'gossip',
+      });
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `You won't believe what I just heard — ${topic}` },
+          { speaker: otherNpc.name, text: `Seriously? That's wild.` },
+          { speaker: npc.name, text: `I know, right? Things are getting interesting around here.` },
+        ],
+        topic: 'gossip',
+      });
+    }
+    if (theirGossip.length > 0) {
+      const topic = theirGossip[0].topic;
+      templates.push({
+        lines: [
+          { speaker: otherNpc.name, text: `${npc.name}! I've been wanting to tell someone — ${topic}` },
+          { speaker: npc.name, text: `Wait, really? How do you know about that?` },
+          { speaker: otherNpc.name, text: `Word gets around. I thought you should know.` },
+        ],
+        topic: 'gossip',
+      });
+    }
+
+    // ── Activity/work-based ──
+    templates.push({
+      lines: [
+        { speaker: npc.name, text: `Hey ${otherNpc.name}, busy with ${activity2}?` },
+        { speaker: otherNpc.name, text: `Yeah, it never ends. How about you? Still ${activity1}?` },
+        { speaker: npc.name, text: `Always. But I don't mind — keeps me out of trouble.` },
+        { speaker: otherNpc.name, text: `Ha! Trouble has a way of finding people regardless.` },
+      ],
+      topic: 'work',
+    });
+
+    // ── Relationship-aware ──
+    if (familiar) {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `${otherNpc.name}! Good to see a friendly face this ${timeOfDay}.` },
+          { speaker: otherNpc.name, text: `You too, ${npc.name}. It's been a long day.` },
+          { speaker: npc.name, text: `Tell me about it. Want to grab something to eat later?` },
+          { speaker: otherNpc.name, text: `I'd like that. Let's do it.` },
+        ],
+        topic: 'catching up',
+      });
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `I've been meaning to ask you something, ${otherNpc.name}.` },
+          { speaker: otherNpc.name, text: `Oh? What's on your mind?` },
+          { speaker: npc.name, text: `Do you think things are going well around here? I feel like something's... off.` },
+          { speaker: otherNpc.name, text: `I know what you mean. There's been a strange mood lately.` },
+        ],
+        topic: 'concerns',
+      });
+    } else {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `Good ${timeOfDay}, ${otherNpc.name}. I don't think we've talked much.` },
+          { speaker: otherNpc.name, text: `No, we haven't! I'm usually busy with ${activity2}. What do you do?` },
+          { speaker: npc.name, text: `I'm a ${npc.occupation}. Keeps me on my feet.` },
+          { speaker: otherNpc.name, text: `Sounds like it! Maybe we'll cross paths more often.` },
+        ],
+        topic: 'introduction',
+      });
+    }
+
+    // ── Needs-based (if someone is hungry, tired, etc.) ──
+    if (npc.sim?.needs?.hunger > 0.7) {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `I'm starving. Is there anywhere good to eat around here?` },
+          { speaker: otherNpc.name, text: `The market usually has something. Want me to show you?` },
+          { speaker: npc.name, text: `That'd be great, thanks.` },
+        ],
+        topic: 'food',
+      });
+    }
+    if (npc.sim?.status?.happiness < 35) {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `I've had a rough day, ${otherNpc.name}.` },
+          { speaker: otherNpc.name, text: `I'm sorry to hear that. Want to talk about it?` },
+          { speaker: npc.name, text: `Maybe later. Just nice to see someone who cares.` },
+        ],
+        topic: 'venting',
+      });
+    }
+
+    // ── Time-of-day ──
+    if (gameTime.hours >= 19) {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `Long day, huh? The ${timeOfDay} air feels nice though.` },
+          { speaker: otherNpc.name, text: `It does. Quiet nights like this are rare.` },
+          { speaker: npc.name, text: `Enjoy it while it lasts. Tomorrow will be busy again.` },
+        ],
+        topic: 'evening chat',
+      });
+    }
+    if (gameTime.hours < 9) {
+      templates.push({
+        lines: [
+          { speaker: npc.name, text: `Up early, ${otherNpc.name}?` },
+          { speaker: otherNpc.name, text: `Always. ${otherNpc.occupation} work doesn't wait.` },
+          { speaker: npc.name, text: `I respect the hustle. Good luck today.` },
+        ],
+        topic: 'morning routine',
+      });
+    }
+
+    // ── General variety (always available) ──
+    templates.push({
+      lines: [
+        { speaker: npc.name, text: `What do you make of everything that's been happening lately?` },
+        { speaker: otherNpc.name, text: `Honestly? I'm not sure. Feels like things are changing.` },
+        { speaker: npc.name, text: `Change isn't always bad. We'll see how it goes.` },
+        { speaker: otherNpc.name, text: `That's a good way to look at it.` },
+      ],
+      topic: 'village life',
+    });
+    templates.push({
+      lines: [
+        { speaker: otherNpc.name, text: `${npc.name}! Just the person I was hoping to run into.` },
+        { speaker: npc.name, text: `Oh? What's up?` },
+        { speaker: otherNpc.name, text: `Nothing urgent — I just wanted some company for a bit.` },
+        { speaker: npc.name, text: `I could use that too. Walk with me?` },
+      ],
+      topic: 'socializing',
+    });
+
+    // Pick one template — prefer gossip/context-heavy ones
+    const chosen = templates[Math.floor(Math.random() * templates.length)];
+
+    // Show speech bubbles with staggered timing
+    chosen.lines.forEach((line, i) => {
+      const speaker = line.speaker === npc.name ? npc : otherNpc;
+      setTimeout(() => speaker.say(line.text, 3500), i * 2500);
+    });
+
+    conversationData.lines = chosen.lines;
+    conversationData.topic = chosen.topic;
+
+    // Spread gossip even in offline mode
     for (const topic of myGossip) {
       this.markTopicSpreadTo(topic.topic, otherNpc.name);
       if (otherNpc.cognition) otherNpc.cognition.addHotTopic(topic.topic, npc.name, 5, gameTime);
     }
+    for (const topic of theirGossip) {
+      if (otherNpc.cognition) otherNpc.cognition.markTopicSpreadTo(topic.topic, npc.name);
+      this.addHotTopic(topic.topic, otherNpc.name, 5, gameTime);
+    }
 
-    this.memory.add(`Chatted with ${otherNpc.name}.`, 'dialogue', 4, gameTime);
+    this.memory.add(`Chatted with ${otherNpc.name} about ${chosen.topic}.`, 'dialogue', 4, gameTime);
+    if (otherNpc.cognition) {
+      otherNpc.cognition.memory.add(`Chatted with ${npc.name} about ${chosen.topic}.`, 'dialogue', 4, gameTime);
+    }
     return conversationData;
   }
 

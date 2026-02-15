@@ -119,6 +119,7 @@
         <button class="tab" data-tab="tab-chat">Chat</button>
         <button class="tab" data-tab="tab-agents">Agents</button>
         <button class="tab" data-tab="tab-world">World</button>
+        <button class="tab" data-tab="tab-research">Research</button>
       </div>
 
       <!-- Tab: Conversation Feed -->
@@ -228,6 +229,28 @@
         </div>
         <div class="panel-toolbar" style="border-top:1px solid var(--border)">
           <button class="btn small" id="export-btn" style="width:100%">Export Research Data</button>
+        </div>
+      </div>
+
+      <!-- Tab: Research (query simulation data) -->
+      <div class="tab-content" id="tab-research">
+        <div id="research-messages" class="scroll-area">
+          <div class="research-welcome">
+            <div class="research-welcome-title">Simulation Research</div>
+            <div class="research-welcome-desc">Ask questions about what's happening in your world. Query agent memories, goals, relationships, emergent behaviors, and more.</div>
+            <div class="research-suggestions">
+              <button class="research-suggestion" data-q="How have relationships evolved between all characters?">Relationship evolution</button>
+              <button class="research-suggestion" data-q="What are the current goals and motivations of each character?">Agent goals</button>
+              <button class="research-suggestion" data-q="What emergent behaviors or social patterns have appeared?">Emergent behaviors</button>
+              <button class="research-suggestion" data-q="How has information and gossip spread through the community?">Information flow</button>
+              <button class="research-suggestion" data-q="Give me a timeline of the most important events so far">Event timeline</button>
+              <button class="research-suggestion" data-q="Which characters have changed the most since the simulation started?">Character evolution</button>
+            </div>
+          </div>
+        </div>
+        <div class="chat-input-group">
+          <input type="text" id="research-input" placeholder="Ask about memories, goals, behaviors..." autocomplete="off">
+          <button class="btn small accent" id="research-send-btn">Ask</button>
         </div>
       </div>
     </div>

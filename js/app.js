@@ -32,8 +32,11 @@ class App {
     // ── Cognitive Architecture Timers ──
     this.cognitiveTimer = 0;
     this.cognitiveInterval = 3500;   // ★ Run cognitive cycle every 3.5s (was 8s)
+    this.baseCognitiveInterval = 3500;
     this.cognitiveQueue = [];
     this.planningQueue = [];
+    this.apiFailureCount = 0;        // Track recent API failures for adaptive backoff
+    this.apiFailureResetTimer = 0;
 
     // ── Conversation Feed (visible to player) ──
     this.conversationFeed = [];
@@ -105,6 +108,27 @@ class App {
     // Export
     document.getElementById('export-btn')?.addEventListener('click', () => this.exportResearchData());
 
+    // ── Research Tab ──
+    this.researchHistory = [];
+    const researchInput = document.getElementById('research-input');
+    const researchSendBtn = document.getElementById('research-send-btn');
+    if (researchInput) {
+      researchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._handleResearchQuery(); }
+      });
+    }
+    if (researchSendBtn) {
+      researchSendBtn.addEventListener('click', () => this._handleResearchQuery());
+    }
+    // Suggestion buttons
+    document.querySelectorAll('.research-suggestion').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const q = btn.dataset.q;
+        if (researchInput) researchInput.value = q;
+        this._handleResearchQuery();
+      });
+    });
+
     // Agent selector (in Agents tab)
     document.getElementById('state-agent-select')?.addEventListener('change', e => {
       this._renderAgentState(e.target.value);
@@ -153,8 +177,13 @@ class App {
         await this._sleep(500);
         worldData = this._getDemoWorld(desc);
       } else {
-        this.ui.setLoadingText('Asking AI to design the world...');
-        worldData = await this._generateWorldData(desc);
+        // ★ Phase 1: Architect analyzes prompt → culture, landmarks, visual theme, shapes
+        this.ui.setLoadingText('Architect analyzing your world...');
+        const blueprint = await this._architectWorld(desc);
+
+        // ★ Phase 2: World builder uses blueprint to generate full world
+        this.ui.setLoadingText('Building the world from blueprint...');
+        worldData = await this._generateWorldData(desc, blueprint);
       }
 
       this.ui.setLoadingText('Building the landscape...');
@@ -280,27 +309,181 @@ class App {
     }
   }
 
-  async _generateWorldData(description) {
+  // ═══════════════════════════════════════════════════════════════
+  //  ARCHITECT LLM — Phase 1: Analyze prompt → culture, landmarks, visual theme
+  // ═══════════════════════════════════════════════════════════════
+  async _architectWorld(description) {
+    const systemPrompt = `You are a world ARCHITECT for a 2D simulation game. Your job is to analyze a user's world description and produce a BLUEPRINT — the culture, visual theme, landmark shapes, and building types needed BEFORE the world is built.
+
+Return JSON with this structure:
+{
+  "culture": "short culture/era identifier (e.g. 'ancient egypt', 'mughal india', 'feudal japan', 'roman empire', 'cyberpunk', 'nordic viking', 'mesoamerican', etc.)",
+  "era": "time period (e.g. 'ancient', 'medieval', 'modern', 'futuristic')",
+  "visual": {
+    "ground": "grass|stone|sand|dirt|marble|metal|concrete|wood|tile",
+    "paths": "paved|dirt|stone|wood|cobblestone|metal|gravel",
+    "vegetation": "none|sparse|moderate|lush",
+    "buildingStyle": "rustic|modern|futuristic|medieval|industrial|colorful|natural",
+    "culturePalette": "egyptian|indian|japanese|chinese|greek|roman|arabian|african|mesoamerican|nordic|scifi|fantasy|rustic|modern|futuristic|medieval|industrial|colorful|natural",
+    "roadLayout": "cross|radial|organic",
+    "palette": {"primary": "#hex", "secondary": "#hex", "accent": "#hex"}
+  },
+  "landmarks": [
+    {
+      "name": "Landmark Name",
+      "role": "what it is (e.g. pyramid, mausoleum, arena, temple, monument)",
+      "shape": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument",
+      "color": "#hex wall/body color",
+      "roofColor": "#hex roof/accent color"
+    }
+  ],
+  "suggestedBuildings": [
+    {
+      "name": "Building Name",
+      "type": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|house|tavern|shop|blacksmith|church|school|library|cafe|hospital|farm|market|townhall|bakery|inn|temple|castle|stable|fountain|palace|ziggurat|sphinx|barracks",
+      "shape": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|default",
+      "landmark": true/false,
+      "color": "#hex (optional, culturally appropriate)",
+      "roofColor": "#hex (optional)"
+    }
+  ],
+  "suggestedAreas": [
+    {"name": "Area Name", "type": "forest|water|park|desert|sand|plaza|ruins|rocky|farm|swamp|garden|courtyard|indoor"}
+  ],
+  "specialShapes": [
+    {"type": "circle|ellipse|ring|polygon", "x": 32, "y": 24, "radius": 3, "fill": "#hex", "stroke": "#hex", "label": "optional label"}
+  ]
+}
+
+CRITICAL RULES:
+- Infer the CULTURE and ERA from the user's description. "Ancient Egypt" → culture:"ancient egypt". "Taj Mahal" → culture:"mughal india". "Tokyo" → culture:"japanese". "Mars colony" → culture:"scifi".
+- For LANDMARKS the user mentions (Taj Mahal, pyramids, Colosseum, pagoda, etc.), add them with the correct SHAPE:
+  - Pyramids → shape:"pyramid", sandy colors
+  - Taj Mahal / domed buildings → shape:"dome", white/cream + gold
+  - Obelisks → shape:"obelisk", stone + gold cap
+  - Minarets → shape:"minaret", cream/white + gold
+  - Ziggurats → shape:"step_pyramid", earthy tones
+  - Japanese temples → shape:"pagoda", red/black
+  - Roman arena → shape:"colosseum", stone colors
+  - Nomad/desert camps → shape:"tent"
+  - African/tribal → shape:"hut"
+  - Watchtowers → shape:"tower"
+  - Statues/memorials → shape:"monument"
+- MOST buildings should use shape:"default" (normal rectangular buildings). Only landmarks and culturally iconic structures get special shapes.
+- The visual palette and ground must MATCH the culture:
+  - Egypt → ground:"sand", paths:"stone", vegetation:"sparse", culturePalette:"egyptian", roadLayout:"radial"
+  - India → ground:"stone", paths:"stone", vegetation:"moderate", culturePalette:"indian", roadLayout:"radial"
+  - Japan → ground:"grass", paths:"stone", vegetation:"lush", culturePalette:"japanese", roadLayout:"organic"
+  - Rome → ground:"stone", paths:"stone", vegetation:"moderate", culturePalette:"roman", roadLayout:"cross"
+  - Fantasy → ground:"grass", paths:"cobblestone", vegetation:"lush", culturePalette:"fantasy"
+  - Sci-fi → ground:"metal", paths:"metal", vegetation:"none", culturePalette:"scifi"
+- Generate 3-5 areas that fit the culture (e.g. "Nile Banks" for Egypt, "Cherry Blossom Garden" for Japan)
+- Generate 6-10 buildings total. 1-3 should be landmarks with special shapes. The rest are default-shaped but culturally named.
+- specialShapes is for non-building shapes like planets, force fields, magical circles. Leave empty [] if not needed.`;
+
+    try {
+      const blueprint = await this.llm.generate(systemPrompt, description, { json: true, temperature: 0.7, maxTokens: 2048 });
+      return blueprint;
+    } catch (err) {
+      console.warn('Architect LLM failed, using basic blueprint:', err.message);
+      return this._fallbackBlueprint(description);
+    }
+  }
+
+  _fallbackBlueprint(description) {
+    // Simple keyword-based fallback when architect LLM fails
+    const d = description.toLowerCase();
+    let culture = 'medieval', visual = { ground: 'grass', paths: 'dirt', vegetation: 'moderate', buildingStyle: 'rustic', culturePalette: 'rustic', roadLayout: 'cross' };
+
+    if (d.includes('egypt') || d.includes('pyramid') || d.includes('pharaoh') || d.includes('nile')) {
+      culture = 'ancient egypt';
+      visual = { ground: 'sand', paths: 'stone', vegetation: 'sparse', buildingStyle: 'natural', culturePalette: 'egyptian', roadLayout: 'radial' };
+    } else if (d.includes('india') || d.includes('taj') || d.includes('mughal') || d.includes('hindi')) {
+      culture = 'mughal india';
+      visual = { ground: 'stone', paths: 'stone', vegetation: 'moderate', buildingStyle: 'natural', culturePalette: 'indian', roadLayout: 'radial' };
+    } else if (d.includes('japan') || d.includes('tokyo') || d.includes('samurai') || d.includes('shogun')) {
+      culture = 'feudal japan';
+      visual = { ground: 'grass', paths: 'stone', vegetation: 'lush', buildingStyle: 'natural', culturePalette: 'japanese', roadLayout: 'organic' };
+    } else if (d.includes('rome') || d.includes('roman') || d.includes('colosseum') || d.includes('gladiator')) {
+      culture = 'roman empire';
+      visual = { ground: 'stone', paths: 'stone', vegetation: 'moderate', buildingStyle: 'natural', culturePalette: 'roman', roadLayout: 'cross' };
+    } else if (d.includes('space') || d.includes('mars') || d.includes('planet') || d.includes('sci-fi') || d.includes('cyber')) {
+      culture = 'sci-fi';
+      visual = { ground: 'metal', paths: 'metal', vegetation: 'none', buildingStyle: 'futuristic', culturePalette: 'scifi', roadLayout: 'cross' };
+    } else if (d.includes('arab') || d.includes('persian') || d.includes('desert') || d.includes('oasis')) {
+      culture = 'arabian';
+      visual = { ground: 'sand', paths: 'stone', vegetation: 'sparse', buildingStyle: 'natural', culturePalette: 'arabian', roadLayout: 'radial' };
+    } else if (d.includes('china') || d.includes('chinese') || d.includes('dynasty')) {
+      culture = 'imperial china';
+      visual = { ground: 'grass', paths: 'stone', vegetation: 'moderate', buildingStyle: 'natural', culturePalette: 'chinese', roadLayout: 'cross' };
+    } else if (d.includes('norse') || d.includes('viking') || d.includes('nordic')) {
+      culture = 'norse viking';
+      visual = { ground: 'grass', paths: 'dirt', vegetation: 'moderate', buildingStyle: 'rustic', culturePalette: 'nordic', roadLayout: 'organic' };
+    } else if (d.includes('greek') || d.includes('athens') || d.includes('olymp')) {
+      culture = 'ancient greece';
+      visual = { ground: 'stone', paths: 'stone', vegetation: 'moderate', buildingStyle: 'natural', culturePalette: 'greek', roadLayout: 'cross' };
+    } else if (d.includes('aztec') || d.includes('maya') || d.includes('inca') || d.includes('mesoamerican')) {
+      culture = 'mesoamerican';
+      visual = { ground: 'grass', paths: 'stone', vegetation: 'lush', buildingStyle: 'natural', culturePalette: 'mesoamerican', roadLayout: 'radial' };
+    } else if (d.includes('africa') || d.includes('tribal') || d.includes('savanna')) {
+      culture = 'african';
+      visual = { ground: 'dirt', paths: 'dirt', vegetation: 'sparse', buildingStyle: 'natural', culturePalette: 'african', roadLayout: 'organic' };
+    }
+
+    return { culture, era: 'ancient', visual, landmarks: [], suggestedBuildings: [], suggestedAreas: [], specialShapes: [] };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  WORLD BUILDER LLM — Phase 2: Use blueprint to generate full world
+  // ═══════════════════════════════════════════════════════════════
+  async _generateWorldData(description, blueprint = null) {
+    const bp = blueprint || {};
+    const bpContext = blueprint ? `
+ARCHITECT BLUEPRINT (use this to guide your output):
+- Culture: ${bp.culture || 'generic'}
+- Era: ${bp.era || 'medieval'}
+- Visual theme: ${JSON.stringify(bp.visual || {})}
+- Landmarks to include: ${JSON.stringify(bp.landmarks || [])}
+- Suggested buildings: ${JSON.stringify(bp.suggestedBuildings || [])}
+- Suggested areas: ${JSON.stringify(bp.suggestedAreas || [])}
+- Special shapes: ${JSON.stringify(bp.specialShapes || [])}
+
+YOU MUST use the blueprint's landmarks, visual theme, and culture. Include ALL landmarks from the blueprint as buildings with their exact shape, color, and roofColor. Use the suggested buildings and areas, but you can add more.` : '';
+
     const systemPrompt = `You are a world builder for a 2D simulation game. Generate a world that MATCHES the user's description.
+${bpContext}
 
 Return JSON with this structure:
 {
   "name": "World Name",
   "description": "Brief description",
+  "culture": "${bp.culture || 'the culture/era of this world'}",
   "economy": {
     "currencyName": "gold",
     "taxRate": 0.1,
     "prices": { "food": 2.5, "tool": 12, "lodging": 8, "healing": 15, "gift": 5, "marketStall": 50 }
   },
   "visual": {
-    "ground": "grass|concrete|stone|sand|wood|metal|dirt|carpet|tile|marble",
-    "paths": "paved|dirt|stone|wood|metal|cobblestone|carpet",
+    "ground": "grass|stone|sand|dirt|marble|metal|concrete|wood|tile",
+    "paths": "paved|dirt|stone|wood|cobblestone|metal|gravel",
     "vegetation": "none|sparse|moderate|lush",
     "buildingStyle": "rustic|modern|futuristic|medieval|industrial|colorful|natural",
+    "culturePalette": "egyptian|indian|japanese|chinese|greek|roman|arabian|african|mesoamerican|nordic|scifi|fantasy|rustic|modern|futuristic|medieval|industrial",
+    "roadLayout": "cross|radial|organic",
     "palette": {"primary": "#hex", "secondary": "#hex", "accent": "#hex"}
   },
-  "areas": [{"name": "Area Name", "type": "forest|water|park|desert|parking|courtyard|lobby|garden|plaza|indoor|pool"}],
-  "buildings": [{"name": "Building Name", "type": "house|tavern|shop|blacksmith|church|school|library|cafe|hospital|farm|market|townhall|bakery|inn|temple|castle|stable|fountain"}],
+  "areas": [{"name": "Area Name", "type": "forest|water|park|desert|sand|plaza|ruins|rocky|farm|swamp|garden|courtyard|indoor"}],
+  "buildings": [
+    {
+      "name": "Building Name",
+      "type": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|house|tavern|shop|blacksmith|church|school|library|cafe|hospital|farm|market|townhall|bakery|inn|temple|castle|stable|fountain|palace|ziggurat|sphinx|barracks",
+      "shape": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|default",
+      "landmark": true/false,
+      "color": "#hex (culturally appropriate wall/body color)",
+      "roofColor": "#hex (culturally appropriate roof/accent color)"
+    }
+  ],
+  "specialShapes": [],
   "characters": [
     {
       "name": "Full Name", "age": 30, "occupation": "Job Title",
@@ -313,16 +496,12 @@ Return JSON with this structure:
 }
 
 CRITICAL RULES:
-- "visual" describes how the world LOOKS. Match it to the description:
-  - Medieval village → ground:"grass", paths:"dirt", vegetation:"lush", buildingStyle:"rustic"
-  - Tech office → ground:"concrete", paths:"carpet", vegetation:"none", buildingStyle:"modern"
-  - Fantasy realm → ground:"grass", paths:"cobblestone", vegetation:"lush", buildingStyle:"medieval"
-  - Space station → ground:"metal", paths:"metal", vegetation:"none", buildingStyle:"futuristic"
-  - Beach town → ground:"sand", paths:"wood", vegetation:"sparse", buildingStyle:"natural"
-  - ANY world the user describes → pick the visual properties that match best
-- Building names should match the world (office: "Design Studio", village: "The Rusty Tavern", etc.)
-- Use the closest building type for the look (office "Conference Room" → type "library")
-- Generate 3-5 areas, 6-10 buildings, and EXACTLY ${this.inhabitantCount} characters with RICH relationships
+- EVERY building MUST have "shape" set. Use "default" for normal rectangular buildings, or a special shape for landmarks.
+- Landmarks (pyramids, domes, temples, etc.) MUST have shape set to the correct parametric shape (pyramid, dome, obelisk, minaret, step_pyramid, pagoda, colosseum, tent, hut, tower, monument).
+- Building colors MUST match the culture. Egyptian buildings should use sandy/gold colors. Indian buildings should use cream/red/gold. Japanese should use red/black/cream. etc.
+- Character names MUST be culturally appropriate (Egyptian: Imhotep, Nefertari; Indian: Arjun, Priya; Japanese: Takeshi, Yuki; etc.)
+- Areas should reflect the world's geography (Egyptian: "Nile Banks", "Desert Dunes"; Indian: "Palace Gardens", "Sacred River")
+- Generate 3-5 areas, 6-10 buildings (1-3 landmarks + regular buildings), and EXACTLY ${this.inhabitantCount} characters with RICH relationships
 
 CHARACTER RELATIONSHIP RULES (VERY IMPORTANT):
 - Each character MUST have 2-4 relationships with OTHER characters in the list
@@ -332,7 +511,7 @@ CHARACTER RELATIONSHIP RULES (VERY IMPORTANT):
 - Relationships should be BIDIRECTIONAL — if A knows B, B should know A
 - Include both positive and negative relationships for drama
 
-ECONOMY (optional): If you include "economy", use currencyName (e.g. "gold", "coins"), taxRate (0.05-0.15), and prices for food, tool, lodging, healing, gift, marketStall. The village has a bank and a treasury; taxes and prices dictate who gets ahead.`;
+ECONOMY (optional): If you include "economy", use currencyName appropriate to the culture (e.g. "deben" for Egypt, "rupee" for India, "denarius" for Rome).`;
 
     return await this.llm.generate(systemPrompt, description, { json: true, temperature: 0.9, maxTokens: 4096 });
   }
@@ -397,6 +576,17 @@ ECONOMY (optional): If you include "economy", use currencyName (e.g. "gold", "co
     // ★ Community event update (election, festival, etc.)
     if (this.communityEvent?.active) {
       this.communityEvent.update(dt);
+    }
+
+    // ★ Adaptive API failure recovery: gradually reset failure count
+    this.apiFailureResetTimer += dt;
+    if (this.apiFailureResetTimer > 15000) { // every 15s, decay failure count
+      this.apiFailureResetTimer = 0;
+      if (this.apiFailureCount > 0) {
+        this.apiFailureCount = Math.max(0, this.apiFailureCount - 1);
+        // Gradually restore cognitive interval toward base
+        this.cognitiveInterval = this.baseCognitiveInterval + this.apiFailureCount * 2000;
+      }
     }
 
     // ★ Cognitive cycle (Perceive → Plan → Decide → Act → Reflect)
@@ -959,8 +1149,9 @@ For resources: typical delta ±5 to ±30.`,
       }
     }
 
-    // Process 3 NPCs per tick = many parallel conversations possible
-    const count = 3;
+    // ★ Adaptive NPC processing: reduce when API is stressed or rate-limited
+    const rateLimited = this.llm?.isRateLimited?.();
+    const count = rateLimited ? 1 : this.apiFailureCount > 4 ? 1 : this.apiFailureCount > 2 ? 2 : 3;
     for (let i = 0; i < count; i++) {
       if (this.cognitiveQueue.length === 0) {
         this.cognitiveQueue = [...this.npcs].sort(() => Math.random() - 0.5);
@@ -1402,14 +1593,46 @@ For resources: typical delta ±5 to ±30.`,
     if (!this.worldSim) return;
     const ws = this.worldSim;
 
-    // Build world context string that all agents can see
-    const crises = [];
-    if (ws.resources.food < this.npcs.length * 3) crises.push(`Food supply is critically low (${ws.resources.food.toFixed(0)} remaining)`);
-    if (ws.governance.unrest > 40) crises.push(`Village unrest is high (${ws.governance.unrest.toFixed(0)}%)`);
-    if (ws.economy.prosperity < 30) crises.push(`Economy is struggling (prosperity: ${ws.economy.prosperity.toFixed(0)})`);
-    if (ws.governance.leader) crises.push(`${ws.governance.leader} is the village leader`);
+    // ★ Build RICH world context — mix of crises, neutral facts, and positive observations
+    //    so conversations aren't always about food shortages
+    const facts = [];
 
-    const worldContext = crises.length > 0 ? crises.join('. ') : 'Things are relatively peaceful in the village.';
+    // Leadership
+    if (ws.governance.leader) facts.push(`${ws.governance.leader} leads the village`);
+
+    // Economy — describe it in words, not just crisis alerts
+    if (ws.economy.prosperity > 70) facts.push('The village is thriving economically');
+    else if (ws.economy.prosperity > 45) facts.push('The economy is stable');
+    else if (ws.economy.prosperity < 30) facts.push('The economy is struggling');
+
+    // Unrest
+    if (ws.governance.unrest > 60) facts.push(`Tension is high among the villagers (${ws.governance.unrest.toFixed(0)}% unrest)`);
+    else if (ws.governance.unrest < 15) facts.push('The village is peaceful and harmonious');
+
+    // Food — only mention if truly critical (not mild shortage)
+    if (ws.resources.food < this.npcs.length * 1.5) {
+      facts.push(`Food reserves are dangerously low`);
+    } else if (ws.resources.food > this.npcs.length * 8) {
+      facts.push('Food is plentiful');
+    }
+
+    // Recent partnerships/relationships — social flavor
+    for (const npc of this.npcs) {
+      if (npc.sim?.partner) {
+        facts.push(`${npc.name} and ${npc.sim.partner} are partners`);
+        break; // only mention one to keep it short
+      }
+    }
+
+    // Recent community events
+    if (this.worldEvents.length > 0) {
+      facts.push(`Current events: ${this.worldEvents.map(e => e.description).join('; ')}`);
+    }
+
+    // Population
+    facts.push(`Population: ${ws.population}`);
+
+    const worldContext = facts.join('. ') + '.';
 
     for (const npc of this.npcs) {
       // Set world context on each NPC (read by getAgentSummary)
@@ -1576,19 +1799,60 @@ What state changes result from this conversation?`,
   _addToConversationFeed(convData) {
     convData.timestamp = Date.now();
 
-    // ★ Deduplicate: skip if same pair + same topic in last 90 seconds
+    // ★ Track conversation quality for adaptive rate limiting
+    this._trackConversationResult(convData);
+
+    // ★ Deduplicate: skip if same pair + same SPECIFIC topic in last 90 seconds
+    // Don't dedup on generic topics like 'greeting', 'small talk', 'seeking' —
+    // these are common and blocking them starves the feed.
     const pair = [convData.speaker1, convData.speaker2].sort().join('+');
-    const isDupe = this.conversationFeed.some(c => {
-      const cPair = [c.speaker1, c.speaker2].sort().join('+');
-      return cPair === pair && c.topic === convData.topic && (Date.now() - c.timestamp) < 90000;
-    });
-    if (isDupe) return;
+    const genericTopics = new Set(['greeting', 'small talk', 'seeking', 'gossip', 'socializing', 'work', 'catching up']);
+    const isSpecificTopic = convData.topic && !genericTopics.has(convData.topic);
+
+    if (isSpecificTopic) {
+      const isDupe = this.conversationFeed.some(c => {
+        const cPair = [c.speaker1, c.speaker2].sort().join('+');
+        return cPair === pair && c.topic === convData.topic && (Date.now() - c.timestamp) < 90000;
+      });
+      if (isDupe) return;
+    } else {
+      // For generic topics: only dedup same pair within 30 seconds (much shorter window)
+      const isDupe = this.conversationFeed.some(c => {
+        const cPair = [c.speaker1, c.speaker2].sort().join('+');
+        return cPair === pair && (Date.now() - c.timestamp) < 30000;
+      });
+      if (isDupe) return;
+    }
 
     this.conversationFeed.push(convData);
     if (this.conversationFeed.length > this.maxFeedEntries) {
       this.conversationFeed.shift();
     }
     this._updateConversationFeedUI();
+  }
+
+  // ★ Track conversation quality and adapt cognitive cycle speed
+  _trackConversationResult(convData) {
+    const lineCount = convData.lines?.length || 0;
+    const isRich = lineCount >= 3 && convData.topic !== 'greeting';
+
+    if (isRich) {
+      // Good conversation — decrease failure count, speed up cycle
+      this.apiFailureCount = Math.max(0, this.apiFailureCount - 1);
+    } else if (lineCount <= 2) {
+      // Thin/failed conversation — increase failure count, slow down
+      this.apiFailureCount++;
+    }
+
+    // Adapt cognitive interval: base + 2s per failure, max 15s
+    this.cognitiveInterval = Math.min(15000,
+      this.baseCognitiveInterval + this.apiFailureCount * 2000
+    );
+
+    // Log for debugging
+    if (this.apiFailureCount > 2) {
+      console.warn(`API stress detected: ${this.apiFailureCount} thin conversations, cognitive interval → ${this.cognitiveInterval}ms`);
+    }
   }
 
   _updateConversationFeedUI() {
@@ -1639,6 +1903,13 @@ What state changes result from this conversation?`,
 
     const recent = entries.slice(-15).reverse();
     const now = Date.now();
+
+    // ★ PRESERVE EXPANDED STATE: remember which entries the user has open
+    const expandedEntries = new Set();
+    feed.querySelectorAll('.feed-entry:not(.collapsed)').forEach(el => {
+      if (el.id) expandedEntries.add(el.id);
+    });
+
     feed.innerHTML = recent.map((c, idx) => {
       const lines = c.lines.map(l =>
         `<div class="feed-line"><b>${l.speaker}:</b> ${l.text}</div>`
@@ -1658,9 +1929,11 @@ What state changes result from this conversation?`,
         : c.topic === 'action' ? 'feed-topic-tag feed-topic-action'
         : 'feed-topic-tag';
 
-      // All entries collapsed by default; user expands to read
-      const collapsedClass = 'collapsed';
       const entryId = `feed-entry-${c.timestamp || idx}`;
+
+      // ★ Preserve expanded state: if user had this entry open, keep it open
+      const wasExpanded = expandedEntries.has(entryId);
+      const collapsedClass = wasExpanded ? '' : 'collapsed';
 
       // Preview: first line truncated
       const preview = c.lines.length > 0
@@ -1947,6 +2220,266 @@ Write it as an engaging story, not a dry report.`,
     return phenomena.sort((a, b) => b.significance - a.significance);
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  RESEARCH TAB — Query simulation data with LLM + RAG
+  // ═══════════════════════════════════════════════════════════════
+
+  async _handleResearchQuery() {
+    const input = document.getElementById('research-input');
+    const query = input?.value?.trim();
+    if (!query) return;
+    input.value = '';
+
+    // Remove welcome message on first query
+    const welcome = document.querySelector('.research-welcome');
+    if (welcome) welcome.remove();
+
+    // Show user message
+    this._addResearchMessage(query, 'user');
+
+    // Show thinking indicator
+    const thinkingEl = this._addResearchThinking();
+
+    try {
+      // ★ RAG: Gather relevant context based on the query
+      const context = this._gatherResearchContext(query);
+
+      if (!this.llm.hasAnyKey()) {
+        // No API key — show raw data dump
+        thinkingEl.remove();
+        this._addResearchMessage(this._formatOfflineResearchAnswer(query, context), 'system');
+        return;
+      }
+
+      // ★ LLM call with gathered context
+      const answer = await this.llm.generate(
+        `You are a simulation researcher analyzing a living world simulation called "${this.world?.name || 'Unknown'}". 
+You have access to detailed data about every agent's memories, goals, relationships, and the world state.
+Answer the user's research question using ONLY the provided simulation data. Be specific — cite agent names, exact events, and timeline details.
+Format your answer with clear structure. Use **bold** for agent names and key findings. Use bullet points for lists.
+If the data doesn't contain enough info to answer, say so honestly.`,
+
+        `RESEARCH QUESTION: "${query}"
+
+${context}
+
+Answer the research question based on the simulation data above. Be analytical and specific.`,
+        { temperature: 0.5, maxTokens: 1500 }
+      );
+
+      thinkingEl.remove();
+      this._addResearchMessage(answer, 'system');
+    } catch (err) {
+      thinkingEl.remove();
+      this._addResearchMessage(`Error: ${err.message}. Try a simpler question or check your API key.`, 'system');
+    }
+
+    // Scroll to bottom
+    const container = document.getElementById('research-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  // ★ RAG context builder — gathers relevant data based on the query
+  _gatherResearchContext(query) {
+    const q = query.toLowerCase();
+    const sections = [];
+
+    // ── Always include: world overview ──
+    if (this.worldSim) {
+      const ws = this.worldSim;
+      sections.push(`WORLD STATE:
+- Name: ${this.world?.name}, Day ${this.gameTime.day}, ${this.gameTime.hours}:${String(this.gameTime.minutes).padStart(2, '0')}
+- Food: ${ws.resources.food.toFixed(0)}, Gold: ${ws.resources.gold.toFixed(0)}, Wood: ${ws.resources.wood.toFixed(0)}, Stone: ${ws.resources.stone.toFixed(0)}
+- Leader: ${ws.governance.leader || 'None'}, Unrest: ${ws.governance.unrest.toFixed(1)}%, Prosperity: ${ws.economy.prosperity.toFixed(1)}
+- Population: ${ws.population}, Treasury: ${(ws.economy.treasury || 0).toFixed(0)}`);
+    }
+
+    // ── Detect which agents the query is about ──
+    const mentionedAgents = this.npcs.filter(npc =>
+      q.includes(npc.name.toLowerCase()) || q.includes(npc.name.split(' ')[0].toLowerCase())
+    );
+    const targetAgents = mentionedAgents.length > 0 ? mentionedAgents : this.npcs;
+
+    // ── Agent memories (if query is about memories, evolution, timeline) ──
+    const wantsMemories = /memor|remember|evolv|timeline|history|changed|grew|develop|over time|progression/i.test(q);
+    if (wantsMemories) {
+      for (const npc of targetAgents) {
+        if (!npc.cognition) continue;
+        const mems = npc.cognition.memory.entries.slice(-30); // last 30 memories
+        if (mems.length === 0) continue;
+        const memStr = mems.map(m =>
+          `  [${m.type}${m.gameDay ? ` Day${m.gameDay}` : ''}${m.gameTimeCreated ? ` ${m.gameTimeCreated}` : ''}] ${m.description.substring(0, 150)}`
+        ).join('\n');
+        sections.push(`MEMORIES OF ${npc.name.toUpperCase()} (${npc.occupation}):\n${memStr}`);
+      }
+    }
+
+    // ── Goals and motivations ──
+    const wantsGoals = /goal|motiv|want|plan|intend|doing|action|purpose|concern|aspir/i.test(q);
+    if (wantsGoals) {
+      for (const npc of targetAgents) {
+        if (!npc.cognition) continue;
+        const parts = [];
+        if (npc.currentActivity) parts.push(`Current: ${npc.currentActivity}`);
+        if (npc._motivationSummary) parts.push(`Motivations:\n${npc._motivationSummary}`);
+        if (npc.cognition.dailyPlan?.length > 0) {
+          parts.push(`Daily plan: ${npc.cognition.dailyPlan.map(p => p.activity || p).join(' → ')}`);
+        }
+        if (npc.sim) {
+          const urgentNeeds = Object.entries(npc.sim.needs).filter(([,v]) => v > 0.6).map(([k,v]) => `${k}:${v.toFixed(2)}`);
+          if (urgentNeeds.length) parts.push(`Urgent needs: ${urgentNeeds.join(', ')}`);
+        }
+        if (parts.length > 0) {
+          sections.push(`GOALS OF ${npc.name.toUpperCase()} (${npc.occupation}):\n${parts.join('\n')}`);
+        }
+      }
+    }
+
+    // ── Relationships ──
+    const wantsRelationships = /relation|friend|enemy|rival|trust|love|partner|social|between|connect|interact|bond/i.test(q);
+    if (wantsRelationships) {
+      for (const npc of targetAgents) {
+        if (!npc.simRelationships || npc.simRelationships.size === 0) continue;
+        const rels = [];
+        for (const [name, rel] of npc.simRelationships) {
+          rels.push(`  ${name}: ${rel.label} (trust:${rel.trust.toFixed(2)}, attraction:${rel.attraction.toFixed(2)}, respect:${rel.respect.toFixed(2)}, rivalry:${rel.rivalry.toFixed(2)}, interactions:${rel.interactions})`);
+        }
+        if (npc.cognition?.relationshipHistory?.length > 0) {
+          const evolutions = npc.cognition.relationshipHistory.map(h =>
+            `  ${h.target}: ${h.from} → ${h.to} (Day ${h.day || '?'})`
+          );
+          rels.push(`Relationship changes:\n${evolutions.join('\n')}`);
+        }
+        sections.push(`RELATIONSHIPS OF ${npc.name.toUpperCase()}:\n${rels.join('\n')}`);
+      }
+    }
+
+    // ── Emergent behaviors ──
+    const wantsEmergent = /emergen|pattern|cluster|group|shared|belief|cascade|spread|phenomen|behavio|dynamic|structure/i.test(q);
+    if (wantsEmergent) {
+      const phenomena = this._detectEmergentPhenomena();
+      if (phenomena.length > 0) {
+        sections.push(`EMERGENT PHENOMENA:\n${phenomena.map(p => `- [${p.type}] ${p.description}`).join('\n')}`);
+      } else {
+        sections.push('EMERGENT PHENOMENA: None detected yet.');
+      }
+    }
+
+    // ── Conversations ──
+    const wantsConversations = /convers|talk|discuss|said|chat|dialogue|spoke|told/i.test(q);
+    if (wantsConversations) {
+      const relevant = mentionedAgents.length > 0
+        ? this.conversationFeed.filter(c =>
+            mentionedAgents.some(a => c.speaker1?.includes(a.name) || c.speaker2?.includes(a.name))
+          )
+        : this.conversationFeed;
+      const recentConvs = relevant.slice(-10);
+      if (recentConvs.length > 0) {
+        const convStr = recentConvs.map(c => {
+          const lines = c.lines.map(l => `    ${l.speaker}: ${l.text.substring(0, 100)}`).join('\n');
+          return `  [${c.gameTime || '?'}, topic: ${c.topic}] ${c.speaker1} & ${c.speaker2}\n${lines}`;
+        }).join('\n');
+        sections.push(`RECENT CONVERSATIONS:\n${convStr}`);
+      }
+    }
+
+    // ── Reflections ──
+    const wantsReflections = /reflect|insight|think|believe|opinion|realiz|learn|wisdom/i.test(q);
+    if (wantsReflections) {
+      for (const npc of targetAgents) {
+        if (!npc.cognition) continue;
+        const refs = npc.cognition.memory.getByType('reflection', 10);
+        if (refs.length === 0) continue;
+        const refStr = refs.map(r => `  - ${r.description.substring(0, 150)}`).join('\n');
+        sections.push(`REFLECTIONS OF ${npc.name.toUpperCase()}:\n${refStr}`);
+      }
+    }
+
+    // ── Information flow / gossip ──
+    const wantsGossip = /gossip|information|spread|news|topic|rumor|flow|diffus/i.test(q);
+    if (wantsGossip) {
+      for (const npc of targetAgents) {
+        if (!npc.cognition) continue;
+        const topics = npc.cognition.hotTopics;
+        if (topics.length === 0) continue;
+        const topicStr = topics.map(t =>
+          `  - "${t.topic.substring(0, 80)}" (from: ${t.source}, spread to: ${t.spreadTo.size} people)`
+        ).join('\n');
+        sections.push(`GOSSIP OF ${npc.name.toUpperCase()}:\n${topicStr}`);
+      }
+    }
+
+    // ── Agent status overview (if asking general or "who" questions) ──
+    const wantsOverview = /who|everyone|all character|all agent|overview|summary|each|status|state/i.test(q);
+    if (wantsOverview || sections.length <= 1) {
+      // Include a compact overview of all agents
+      const agentOverviews = this.npcs.map(npc => {
+        const parts = [`${npc.name} (${npc.occupation})`];
+        if (npc.currentActivity) parts.push(`doing: ${npc.currentActivity}`);
+        if (npc.sim) {
+          if (npc.sim.partner) parts.push(`partner: ${npc.sim.partner}`);
+          parts.push(`happiness: ${npc.sim.status.happiness.toFixed(0)}`);
+          parts.push(`wealth: ${npc.sim.status.wealth.toFixed(0)}`);
+          const topNeed = Object.entries(npc.sim.needs).sort((a,b) => b[1] - a[1])[0];
+          if (topNeed && topNeed[1] > 0.5) parts.push(`urgent need: ${topNeed[0]}(${topNeed[1].toFixed(2)})`);
+        }
+        if (npc.cognition) {
+          parts.push(`memories: ${npc.cognition.memory.count()}`);
+          parts.push(`relationships: ${npc.cognition.relationships.size}`);
+        }
+        return `- ${parts.join(', ')}`;
+      }).join('\n');
+      sections.push(`AGENT OVERVIEW:\n${agentOverviews}`);
+    }
+
+    return sections.join('\n\n');
+  }
+
+  // Offline answer when no API key
+  _formatOfflineResearchAnswer(query, context) {
+    return `**No API key configured** — showing raw simulation data for your query.\n\nTo get AI-analyzed answers, add an API key in Settings.\n\n---\n\n${context}`;
+  }
+
+  _addResearchMessage(text, type) {
+    const container = document.getElementById('research-messages');
+    if (!container) return;
+    const div = document.createElement('div');
+    div.className = `research-msg research-msg-${type}`;
+
+    if (type === 'system') {
+      // Light markdown rendering: **bold**, bullet lists, newlines
+      let html = text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/^(\d+)\. (.+)$/gm, '<li>$1. $2</li>')
+        .replace(/\n/g, '<br>');
+      // Wrap consecutive <li> in <ul>
+      html = html.replace(/((?:<li>.*?<\/li><br>?)+)/g, '<ul>$1</ul>');
+      html = html.replace(/<br><\/ul>/g, '</ul>');
+      html = html.replace(/<ul><br>/g, '<ul>');
+      div.innerHTML = html;
+    } else {
+      div.textContent = text;
+    }
+
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    this.researchHistory.push({ role: type, text });
+    return div;
+  }
+
+  _addResearchThinking() {
+    const container = document.getElementById('research-messages');
+    if (!container) return document.createElement('div');
+    const div = document.createElement('div');
+    div.className = 'research-thinking';
+    div.innerHTML = '<div class="spinner" style="display:inline-block;width:12px;height:12px;margin:0 6px 0 0;vertical-align:middle"></div>Analyzing simulation data...';
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return div;
+  }
+
   // ─── HTML Report Generation ────────────────────────────────────
   _generateHTMLReport(data) {
     const agents = data.agents || [];
@@ -2073,18 +2606,29 @@ Active events: ${this.worldEvents.map(e => e.description).join(', ') || 'none'}
 
 The user wants to modify the world. Interpret their request and respond with JSON:
 {
-  "action": "add_building" | "add_character" | "modify_terrain" | "add_decoration" | "event_fire" | "event_rain" | "event_magic" | "announce" | "npc_action" | "stop_event",
+  "action": "add_building" | "add_character" | "modify_terrain" | "add_decoration" | "event_fire" | "event_rain" | "event_magic" | "world_event" | "announce" | "npc_action" | "stop_event",
   "details": {
     "name": "optional name",
     "type": "building/terrain/event type",
     "target": "building name or NPC name if relevant",
     "message": "announcement text if relevant",
-    "description": "what is happening"
+    "description": "what is happening",
+    "severity": "minor" | "moderate" | "major" | "catastrophic",
+    "duration": 30000
   },
   "response": "Brief description of what happened (shown to player)"
 }
 
-IMPORTANT: If the user mentions fire, burning, explosion etc., use "event_fire". If rain/storm, use "event_rain". If magic/sparkle, use "event_magic".
+ACTION SELECTION RULES:
+- "event_fire": fire, burning, explosion at a specific building
+- "event_rain": rain, storm, flooding
+- "event_magic": magic, sparkle, supernatural glow
+- "world_event": ANY major event that affects the whole village — earthquake, plague, drought, famine, invasion, economic crisis, natural disaster, miracle, discovery, war, rebellion, etc. This is the DEFAULT for dramatic events that should impact everyone. Set severity and a clear description.
+- "announce": minor announcements or news that don't change the world state
+- "npc_action": make a specific NPC do something (say/go_to/follow)
+- "add_building"/"add_character"/"modify_terrain": physical world changes
+
+IMPORTANT: Use "world_event" for ANY dramatic event (earthquake, plague, invasion, economic collapse, etc.) — NOT "announce". "announce" is only for minor news. "world_event" actually changes the simulation state and makes NPCs react.
 For "event_fire", set details.target to the building name that should burn.
 For "npc_action", set details.target to the NPC name and details.type to "say"|"go_to"|"follow".`;
 
@@ -2263,12 +2807,64 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
         break;
       }
 
+      case 'world_event': {
+        // ★ Major world events (earthquake, plague, invasion, etc.)
+        // Creates a real world event that changes simulation state and NPCs react to
+        const desc = details.description || details.message || 'Something dramatic happened!';
+        const duration = details.duration || 30000;
+        const severity = details.severity || 'major';
+
+        // Create the world event (triggers _applyEventConsequences + NPC broadcast)
+        const event = this.addWorldEvent(severity === 'catastrophic' ? 'disaster' : 'crisis',
+          this.player.x, this.player.y, {
+            location: details.target || this.world.name,
+            description: desc,
+            duration,
+            severity,
+          }
+        );
+
+        // ★ Inject into EVERY NPC's cognition memory + hot topics (not just entity memory)
+        for (const npc of this.npcs) {
+          if (npc.cognition) {
+            const importance = severity === 'catastrophic' ? 9 : severity === 'major' ? 8 : severity === 'moderate' ? 6 : 4;
+            npc.cognition.memory.add(`[MAJOR EVENT] ${desc}`, 'event', importance, this.gameTime);
+            npc.cognition.addHotTopic(desc, 'world event', importance, this.gameTime);
+          }
+          // Visual reaction
+          const reactions = [
+            'What was that?!', 'Did you feel that?', 'This is terrible!',
+            'Everyone stay calm!', 'We need to do something!', 'Is everyone okay?',
+          ];
+          const delay = Math.random() * 4000;
+          setTimeout(() => npc.say(reactions[Math.floor(Math.random() * reactions.length)], 4000), delay);
+        }
+
+        // Spawn visual particles
+        if (this.renderer) {
+          for (let i = 0; i < 15; i++) {
+            this.renderer.spawnEffect(
+              this.player.x + (Math.random() - 0.5) * 20,
+              this.player.y + (Math.random() - 0.5) * 15,
+              severity === 'catastrophic' ? 'fire' : 'smoke', 3
+            );
+          }
+        }
+        break;
+      }
+
       case 'announce': {
+        // ★ Fixed: announcements now also register in cognition memory + hot topics
         const msg = details.message || details.description || 'Attention everyone!';
         this.ui.notify(msg, 'info', 5000);
         for (const npc of this.npcs) {
           npc.perceiveEvent({ type: 'announcement', message: msg });
-          npc.say('Did you hear that?', 3000);
+          if (npc.cognition) {
+            npc.cognition.memory.add(`Heard announcement: "${msg}"`, 'event', 5, this.gameTime);
+            npc.cognition.addHotTopic(msg, 'announcement', 5, this.gameTime);
+          }
+          const delay = Math.random() * 2000;
+          setTimeout(() => npc.say('Did you hear that?', 3000), delay);
         }
         break;
       }
@@ -2348,8 +2944,10 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
     const bh = bType.includes('church') || bType.includes('hall') ? 6 : bType.includes('shop') ? 4 : 4;
     this.world.buildings.push({
       name: details.name || 'New Building',
-      type: bType, x, y, w: bw, h: bh,
-      color: '#8B7355', roofColor: '#654321',
+      type: bType, shape: details.shape || 'default',
+      x, y, w: bw, h: bh,
+      color: details.color || '#8B7355',
+      roofColor: details.roofColor || '#654321',
       owner: details.owner || null,
     });
   }
@@ -2383,9 +2981,92 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
       }
       seen.add(c.name);
     }
+    // ★ Infer basic culture from description for demo worlds too
+    const dl = (description || '').toLowerCase();
+    let demoWorld = null;
+
+    if (dl.includes('egypt') || dl.includes('pyramid') || dl.includes('pharaoh')) {
+      demoWorld = {
+        name: 'The Kingdom of Kemet',
+        description: description || 'An ancient Egyptian settlement along the banks of the Nile.',
+        culture: 'ancient egypt',
+        visual: { ground: 'sand', paths: 'stone', vegetation: 'sparse', buildingStyle: 'natural', culturePalette: 'egyptian', roadLayout: 'radial', palette: { primary: '#c4a574', secondary: '#daa520', accent: '#8B7355' } },
+        areas: [
+          { name: 'Nile Banks', type: 'water' },
+          { name: 'Sacred Grove', type: 'park' },
+          { name: 'Desert Dunes', type: 'desert' },
+          { name: 'Ancient Ruins', type: 'ruins' },
+        ],
+        buildings: [
+          { name: 'Great Pyramid of Khufu', type: 'pyramid', shape: 'pyramid', landmark: true, color: '#c4a574', roofColor: '#daa520' },
+          { name: 'Temple of Amun-Ra', type: 'temple', shape: 'dome', landmark: true, color: '#e8d5b0', roofColor: '#daa520' },
+          { name: 'Obelisk of the Sun', type: 'obelisk', shape: 'obelisk', landmark: true, color: '#d4c5a0', roofColor: '#daa520' },
+          { name: 'Royal Palace', type: 'palace', shape: 'dome', color: '#f5f0e0', roofColor: '#c9a227' },
+          { name: 'Market of Thebes', type: 'market', shape: 'default', color: '#c4a574', roofColor: '#8B7355' },
+          { name: 'Scribe House', type: 'house', shape: 'default', color: '#d4c5a0', roofColor: '#b0a080' },
+          { name: 'Healer Lodge', type: 'hospital', shape: 'default', color: '#e8d5b0', roofColor: '#c4a574' },
+          { name: 'Artisan Workshop', type: 'blacksmith', shape: 'default', color: '#8B7355', roofColor: '#6b5335' },
+        ],
+      };
+    } else if (dl.includes('india') || dl.includes('taj') || dl.includes('mughal')) {
+      demoWorld = {
+        name: 'Agra — The City of Marble',
+        description: description || 'A magnificent Mughal city centered around the Taj Mahal.',
+        culture: 'mughal india',
+        visual: { ground: 'stone', paths: 'stone', vegetation: 'moderate', buildingStyle: 'natural', culturePalette: 'indian', roadLayout: 'radial', palette: { primary: '#f5f5dc', secondary: '#c9a227', accent: '#c0392b' } },
+        areas: [
+          { name: 'Yamuna River', type: 'water' },
+          { name: 'Palace Gardens', type: 'garden' },
+          { name: 'Spice Market Square', type: 'plaza' },
+        ],
+        buildings: [
+          { name: 'Taj Mahal', type: 'dome', shape: 'dome', landmark: true, color: '#f5f5dc', roofColor: '#c9a227' },
+          { name: 'Red Fort Gate', type: 'castle', shape: 'default', landmark: true, color: '#c0392b', roofColor: '#962d22' },
+          { name: 'Mosque Tower', type: 'minaret', shape: 'minaret', landmark: true, color: '#f0e6d0', roofColor: '#c9a227' },
+          { name: 'Spice Bazaar', type: 'market', shape: 'default', color: '#e8d5b0', roofColor: '#c9a227' },
+          { name: 'Mughal Palace', type: 'palace', shape: 'dome', color: '#f5f0e0', roofColor: '#daa520' },
+          { name: 'Tea House', type: 'cafe', shape: 'default', color: '#d4a574', roofColor: '#a0785a' },
+          { name: 'Weaver Cottage', type: 'house', shape: 'default', color: '#e8d5b0', roofColor: '#c4a574' },
+          { name: 'Healing Temple', type: 'hospital', shape: 'default', color: '#f5f5dc', roofColor: '#d4c5a0' },
+        ],
+      };
+    } else if (dl.includes('japan') || dl.includes('samurai') || dl.includes('shogun')) {
+      demoWorld = {
+        name: 'Sakura Village',
+        description: description || 'A serene Japanese village surrounded by cherry blossoms and bamboo.',
+        culture: 'feudal japan',
+        visual: { ground: 'grass', paths: 'stone', vegetation: 'lush', buildingStyle: 'natural', culturePalette: 'japanese', roadLayout: 'organic', palette: { primary: '#8b0000', secondary: '#2c2c2c', accent: '#f5f5dc' } },
+        areas: [
+          { name: 'Cherry Blossom Garden', type: 'park' },
+          { name: 'Koi Pond', type: 'water' },
+          { name: 'Bamboo Forest', type: 'forest' },
+        ],
+        buildings: [
+          { name: 'Golden Pagoda', type: 'pagoda', shape: 'pagoda', landmark: true, color: '#8b0000', roofColor: '#4a0000' },
+          { name: 'Shogun Castle', type: 'castle', shape: 'default', landmark: true, color: '#2c2c2c', roofColor: '#1a1a1a' },
+          { name: 'Tea Ceremony House', type: 'cafe', shape: 'hut', color: '#f5f5dc', roofColor: '#8B6914' },
+          { name: 'Samurai Dojo', type: 'barracks', shape: 'default', color: '#bc8f8f', roofColor: '#8b6969' },
+          { name: 'Market Street', type: 'market', shape: 'default', color: '#8b0000', roofColor: '#4a0000' },
+          { name: 'Zen Temple', type: 'temple', shape: 'dome', color: '#f5f5dc', roofColor: '#daa520' },
+          { name: 'Rice Paddy Farm', type: 'farm', shape: 'default', color: '#556b2f', roofColor: '#3b4a20' },
+          { name: 'Healer Hut', type: 'hospital', shape: 'default', color: '#f5f5dc', roofColor: '#d4c5a0' },
+        ],
+      };
+    }
+
+    if (demoWorld) {
+      demoWorld.economy = { currencyName: 'gold', taxRate: 0.1, prices: { food: 2.5, tool: 12, lodging: 8, healing: 15, gift: 5, marketStall: 50 } };
+      demoWorld.characters = chars;
+      demoWorld.specialShapes = [];
+      return demoWorld;
+    }
+
+    // Default demo world (medieval village)
     return {
       name: 'Willowbrook Village',
       description: description || 'A charming village nestled between rolling hills and a gentle river.',
+      culture: 'medieval',
+      visual: { ground: 'grass', paths: 'dirt', vegetation: 'lush', buildingStyle: 'rustic', culturePalette: 'rustic', roadLayout: 'cross' },
       economy: {
         currencyName: 'gold',
         taxRate: 0.1,
@@ -2398,15 +3079,16 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
         { name: 'Sandy Shore', type: 'desert' },
       ],
       buildings: [
-        { name: 'The Golden Tankard', type: 'tavern' },
-        { name: 'Ironforge Smithy', type: 'blacksmith' },
-        { name: 'Village Church', type: 'church' },
-        { name: 'Morning Bread Bakery', type: 'bakery' },
-        { name: 'Town Hall', type: 'townhall' },
-        { name: 'Willow Cottage', type: 'house' },
-        { name: 'Maple House', type: 'house' },
-        { name: 'The Curious Cat Shop', type: 'shop' },
+        { name: 'The Golden Tankard', type: 'tavern', shape: 'default' },
+        { name: 'Ironforge Smithy', type: 'blacksmith', shape: 'default' },
+        { name: 'Village Church', type: 'church', shape: 'default' },
+        { name: 'Morning Bread Bakery', type: 'bakery', shape: 'default' },
+        { name: 'Town Hall', type: 'townhall', shape: 'default' },
+        { name: 'Willow Cottage', type: 'house', shape: 'default' },
+        { name: 'Maple House', type: 'house', shape: 'default' },
+        { name: 'The Curious Cat Shop', type: 'shop', shape: 'default' },
       ],
+      specialShapes: [],
       characters: chars,
     };
   }

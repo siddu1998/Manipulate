@@ -70,6 +70,21 @@ export const BUILDING_TYPES = {
   stable:     { w: 6, h: 4, color: '#9a7b4f', roofColor: '#6b5335' },
   well:       { w: 3, h: 3, color: '#888',    roofColor: '#666' },
   fountain:   { w: 4, h: 3, color: '#7fb3d8', roofColor: '#5a9bbe' },
+  // ─── Landmark / Parametric shapes ──────────────────────────────
+  pyramid:       { w: 8, h: 7, color: '#c4a574', roofColor: '#8B7355', shape: 'pyramid' },
+  dome:          { w: 7, h: 6, color: '#f5f5dc', roofColor: '#c9a227', shape: 'dome' },
+  obelisk:       { w: 3, h: 6, color: '#d4c5a0', roofColor: '#b8a070', shape: 'obelisk' },
+  minaret:       { w: 3, h: 7, color: '#f0e6d0', roofColor: '#c9a227', shape: 'minaret' },
+  step_pyramid:  { w: 7, h: 6, color: '#b5a07a', roofColor: '#8a7a5a', shape: 'step_pyramid' },
+  pagoda:        { w: 5, h: 7, color: '#8b0000', roofColor: '#4a0000', shape: 'pagoda' },
+  colosseum:     { w: 8, h: 7, color: '#d4c5a0', roofColor: '#b0a080', shape: 'colosseum' },
+  monument:      { w: 4, h: 5, color: '#c0c0c0', roofColor: '#808080', shape: 'monument' },
+  tent:          { w: 5, h: 4, color: '#e8d5b0', roofColor: '#c9302c', shape: 'tent' },
+  hut:           { w: 4, h: 4, color: '#b5884a', roofColor: '#8B6914', shape: 'hut' },
+  tower:         { w: 4, h: 6, color: '#808080', roofColor: '#4a4a4a', shape: 'tower' },
+  palace:        { w: 9, h: 7, color: '#e8d5b0', roofColor: '#c9a227', shape: 'dome' },
+  ziggurat:      { w: 7, h: 6, color: '#c4a574', roofColor: '#8B7355', shape: 'step_pyramid' },
+  sphinx:        { w: 6, h: 4, color: '#c4a574', roofColor: '#a08050', shape: 'monument' },
 };
 
 export const HAIR_COLORS = [
