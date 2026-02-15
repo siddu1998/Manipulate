@@ -8,54 +8,36 @@
 //    • The world has resources, technology, economy
 //    • Actions modify state → consequences emerge
 //
-//  The LLM is NOT used here. This is pure systems simulation.
-//  The LLM only provides voice when agents talk.
+//  ★ Now schema-driven via WorldDef. The engine reads needs, skills,
+//  traits, actions, and occupations from worldDef generically.
+//  Hardcoded values remain as fallback for demo mode.
 // ═══════════════════════════════════════════════════════════════════
 
-// ─── Agent State Template ─────────────────────────────────────────
-export function createAgentState(npcData) {
-  const rng = seededRng(npcData.name || 'default');
+import { DEFAULT_WORLDDEF } from './worlddef.js';
 
-  // Parse personality text into trait numbers
+// ─── Agent State Template ─────────────────────────────────────────
+export function createAgentState(npcData, worldDef = null) {
+  const rng = seededRng(npcData.name || 'default');
+  const wd = worldDef || DEFAULT_WORLDDEF;
+
+  // Parse personality text into trait numbers (uses worldDef traits as base dimensions)
   const traits = parseTraits(npcData.personality || '', rng);
+  // ★ Merge worldDef-defined traits with parsed traits (worldDef may have culture-specific ones)
+  const wdTraits = wd.createAgentTraits(rng);
+  const mergedTraits = { ...wdTraits, ...traits };
 
   return {
-    // ── Needs (0 = fully satisfied, 1 = desperate) ──
-    needs: {
-      hunger:    0.2 + rng() * 0.2,
-      rest:      0.1 + rng() * 0.2,
-      social:    0.3 + rng() * 0.3,
-      safety:    0.0,
-      fun:       0.3 + rng() * 0.2,
-      purpose:   0.2 + rng() * 0.2,   // need to feel useful
-      romance:   traits.romantic > 0.5 ? 0.3 + rng() * 0.3 : 0.1,
-    },
+    // ── Needs (0 = fully satisfied, 1 = desperate) — ★ from worldDef ──
+    needs: wd.createAgentNeeds(rng),
 
-    // ── Traits (0-1, persistent personality) ──
-    traits,
+    // ── Traits (0-1, persistent personality) — ★ merged: parsed + worldDef-defined ──
+    traits: mergedTraits,
 
-    // ── Skills (0-10, grow with practice) ──
-    skills: {
-      farming:    rng() * 3,
-      crafting:   rng() * 3,
-      cooking:    rng() * 3,
-      trading:    rng() * 3,
-      leadership: rng() * 3,
-      medicine:   rng() * 2,
-      combat:     rng() * 2,
-      art:        rng() * 3,
-      science:    rng() * 2,
-      persuasion: rng() * 3,
-    },
+    // ── Skills (0-10, grow with practice) — ★ from worldDef ──
+    skills: wd.createAgentSkills(rng),
 
-    // ── Status ──
-    status: {
-      health:     85 + rng() * 15,   // 0-100
-      wealth:     20 + rng() * 60,   // gold/currency
-      reputation: 40 + rng() * 30,   // 0-100, community standing
-      happiness:  50 + rng() * 30,   // 0-100
-      energy:     70 + rng() * 30,   // 0-100
-    },
+    // ── Status — ★ from worldDef ──
+    status: wd.createAgentStatus(rng),
 
     // ── Relationships (computed separately) ──
     // Map: name → { trust, attraction, respect, familiarity, fear, rivalry }
@@ -65,6 +47,9 @@ export function createAgentState(npcData) {
 
     // ── Inventory: { name, type, quantity } — food, tools, goods; bakers have bread, etc.
     inventory: getStartingInventory(npcData.occupation, rng),
+
+    // ── Supply chain: resources this agent needs but doesn't have ──
+    neededResources: [],  // ★ populated when occupation production fails
 
     // ── Life stage ──
     lifeStage: npcData.age < 18 ? 'child' : npcData.age < 60 ? 'adult' : 'elder',
@@ -185,76 +170,53 @@ export function getRelationshipLabel(rel) {
 }
 
 // ─── World State ──────────────────────────────────────────────────
-export function createWorldState(worldName, buildings) {
+export function createWorldState(worldName, buildings, worldDef = null) {
+  const wd = worldDef || _activeWorldDef || DEFAULT_WORLDDEF;
+
+  // ★ Resources from worldDef (not hardcoded food/gold/wood/stone)
+  const resources = wd.createWorldResources();
+
+  // ★ Technology from worldDef skills (each skill becomes a tech field)
+  const technology = {};
+  for (const skill of wd.skills) {
+    technology[skill.id] = 0.5 + Math.random();
+  }
+
   return {
     name: worldName,
+    resources,
+    technology,
 
-    // Resources (community-level)
-    resources: {
-      food:     150 + Math.random() * 100,
-      wood:     100 + Math.random() * 80,
-      stone:    60  + Math.random() * 40,
-      iron:     20  + Math.random() * 20,
-      gold:     200 + Math.random() * 300,
-      herbs:    30  + Math.random() * 20,
-    },
-
-    // Technology levels (0-10)
-    technology: {
-      farming:      1 + Math.random(),
-      construction: 1 + Math.random(),
-      medicine:     0.5 + Math.random() * 0.5,
-      smithing:     1 + Math.random(),
-      education:    0.5 + Math.random() * 0.5,
-      trade:        1 + Math.random(),
-      arts:         0.5 + Math.random(),
-    },
-
-    // Economy — currency drives prices, taxes, and who gets ahead
+    // Economy — ★ currency and prices from worldDef
     economy: {
-      currencyName: 'gold',
-      foodPrice:    2 + Math.random(),
-      woodPrice:    3 + Math.random(),
-      toolPrice:    10 + Math.random() * 5,
-      // Priced goods and services (in currency)
-      prices: {
-        food:    2.5,
-        tool:    12,
-        lodging: 8,
-        healing: 15,
-        gift:    5,
-        marketStall: 50,  // cost to open a new shop
-      },
-      taxRate:      0.1,   // fraction of income/wealth collected periodically
-      treasury:     30 + Math.random() * 70,  // community coffers (taxes)
-      prosperity:   50 + Math.random() * 20, // 0-100
+      currencyName: wd.economy.currency,
+      prices: { ...wd.economy.prices },
+      taxRate: wd.economy.taxRate,
+      treasury: 30 + Math.random() * 70,
+      prosperity: 50 + Math.random() * 20,
     },
 
-    // Bank — community savings; agents can deposit/withdraw (future: loans)
-    bank: {
-      balance: 0,  // total deposits (optional: per-agent ledger)
-    },
+    bank: { balance: 0 },
 
-    // Governance — politics; leader can be influenced by wealth/reputation
     governance: {
-      leader:       null,  // NPC name; high wealth + reputation can claim leadership
+      leader: null,
       councilMembers: [],
-      laws:         ['No theft', 'Respect elders', 'Share water'],
-      unrest:       10 + Math.random() * 15, // 0-100
+      laws: [],
+      unrest: 10 + Math.random() * 15,
     },
 
-    // Environment
     environment: {
-      season:       'spring',
-      weather:      'clear',
-      fertility:    0.7 + Math.random() * 0.3,  // crop yield multiplier
-      diseaseRisk:  0.05,
+      season: wd.evolution.seasons?.[0]?.id || 'spring',
+      weather: 'clear',
+      fertility: 0.7 + Math.random() * 0.3,
+      diseaseRisk: 0.05,
     },
 
-    // Stats
-    population:   0,  // set from NPC count
-    day:          1,
-    history:      [],  // [{day, event}]
+    population: 0,
+    day: 1,
+    history: [],
+    culture: [],
+    buildings: buildings || [],
   };
 }
 
@@ -265,14 +227,13 @@ export function createWorldState(worldName, buildings) {
 //  needs grow → agents become motivated → take actions → world changes
 // ═══════════════════════════════════════════════════════════════════
 
+// Helper: check if a field is frozen (user manually set it via state inspector)
+function isFrozen(obj, field) {
+  return obj?._frozen?.[field] && Date.now() < obj._frozen[field];
+}
+
 export function simulationTick(agents, worldState, gameTime) {
   const events = [];
-  const now = Date.now();
-
-  // Helper: check if a field is frozen (user manually set it)
-  function isFrozen(obj, field) {
-    return obj?._frozen?.[field] && now < obj._frozen[field];
-  }
 
   // ── Update each agent ──
   for (const agent of agents) {
@@ -280,32 +241,28 @@ export function simulationTick(agents, worldState, gameTime) {
     const s = agent.sim;
     const traits = s.traits;
 
-    // 1. NEEDS DECAY (skip frozen fields) — hunger much slower so conversations aren't always about food
-    if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.0004);
-    if (!isFrozen(s, 'needs.rest'))    s.needs.rest    = clamp01(s.needs.rest + 0.002);
-    if (!isFrozen(s, 'needs.social'))  s.needs.social  = clamp01(s.needs.social + (traits.introversion > 0.6 ? 0.001 : 0.004));
-    if (!isFrozen(s, 'needs.fun'))     s.needs.fun     = clamp01(s.needs.fun + 0.002);
-    if (!isFrozen(s, 'needs.purpose')) s.needs.purpose = clamp01(s.needs.purpose + 0.001);
-    if (!isFrozen(s, 'needs.romance')) s.needs.romance = clamp01(s.needs.romance + (traits.romantic > 0.5 ? 0.002 : 0.0005));
+    // 1. NEEDS DECAY — ★ uses worldDef when available, falls back to hardcoded
+    if (_activeWorldDef) {
+      dynamicNeedsTick(agent, _activeWorldDef);
+    } else {
+      if (!isFrozen(s, 'needs.hunger'))  s.needs.hunger  = clamp01(s.needs.hunger + 0.0004);
+      if (!isFrozen(s, 'needs.rest'))    s.needs.rest    = clamp01(s.needs.rest + 0.002);
+      if (!isFrozen(s, 'needs.social'))  s.needs.social  = clamp01(s.needs.social + (traits.introversion > 0.6 ? 0.001 : 0.004));
+      if (!isFrozen(s, 'needs.fun'))     s.needs.fun     = clamp01(s.needs.fun + 0.002);
+      if (!isFrozen(s, 'needs.purpose')) s.needs.purpose = clamp01(s.needs.purpose + 0.001);
+      if (!isFrozen(s, 'needs.romance')) s.needs.romance = clamp01(s.needs.romance + (traits.romantic > 0.5 ? 0.002 : 0.0005));
 
-    // 2. STATUS EFFECTS
-    // Hunger affects health and happiness (only when truly starving)
-    if (s.needs.hunger > 0.9) {
-      s.status.health = Math.max(0, s.status.health - 0.1);
-      s.status.happiness = Math.max(0, s.status.happiness - 0.15);
+      // Hardcoded status effects
+      if (s.needs.hunger > 0.9) {
+        s.status.health = Math.max(0, s.status.health - 0.1);
+        s.status.happiness = Math.max(0, s.status.happiness - 0.15);
+      }
+      if (s.needs.social > 0.7) s.status.happiness = Math.max(0, s.status.happiness - 0.15);
+      if (s.needs.rest > 0.7) s.status.energy = Math.max(0, s.status.energy - 0.2);
+      if (s.needs.purpose < 0.3) s.status.happiness = Math.min(100, s.status.happiness + 0.05);
     }
-    // Loneliness affects happiness
-    if (s.needs.social > 0.7) {
-      s.status.happiness = Math.max(0, s.status.happiness - 0.15);
-    }
-    // Rest affects energy
-    if (s.needs.rest > 0.7) {
-      s.status.energy = Math.max(0, s.status.energy - 0.2);
-    }
-    // Purpose fulfilled boosts happiness
-    if (s.needs.purpose < 0.3) {
-      s.status.happiness = Math.min(100, s.status.happiness + 0.05);
-    }
+
+    // 2. STATUS EFFECTS (only for non-worldDef mode; worldDef handles these in dynamicNeedsTick)
 
     // 3. RELATIONSHIP DRIFT
     // Relationships slowly decay without interaction
@@ -333,8 +290,16 @@ export function simulationTick(agents, worldState, gameTime) {
     if (s.needs.hunger > 0.65 && s.status.wealth >= foodPrice) {
       events.push({ type: 'buy_food', agent: agent.name, auto: true });
     }
+    // ★ Cooldown prevents seek_company from firing every tick and flooding the feed
+    const SEEK_COMPANY_COOLDOWN_MS = 45000; // 45 seconds per agent
+    const lastSeek = agent._lastSeekCompanyTime ?? 0;
     if (s.needs.social > 0.85 && traits.introversion < 0.5) {
-      events.push({ type: 'seek_company', agent: agent.name, auto: true });
+      if (Date.now() - lastSeek >= SEEK_COMPANY_COOLDOWN_MS) {
+        events.push({ type: 'seek_company', agent: agent.name, auto: true });
+        agent._lastSeekCompanyTime = Date.now();
+      }
+    } else if (s.needs.social < 0.6) {
+      agent._lastSeekCompanyTime = 0; // Reset cooldown when social need is satisfied
     }
     if (s.needs.romance > 0.7 && traits.romantic > 0.5 && !s.partner) {
       events.push({ type: 'seek_romance', agent: agent.name, auto: true });
@@ -540,12 +505,13 @@ export function applyConsequence(action, agent, target, worldState, allAgents, a
       const pay = 2 + Math.random() * 3 + (worldState.economy?.prosperity ?? 50) * 0.02;
       s.status.wealth += pay;
       transactions.push({ agentName: agent.name, amount: pay, reason: 'work' });
-      const skillKey = occupationSkillMap[agent.occupation?.toLowerCase()] || 'crafting';
+      const skillKey = getOccupationSkill(agent.occupation) || 'crafting';
       if (s.skills[skillKey] !== undefined) {
         s.skills[skillKey] = Math.min(10, s.skills[skillKey] + 0.02);
       }
       // Occupation-based production: bakers make bread, blacksmiths tools, etc.
-      const produced = occupationProduces(agent.occupation);
+      // ★ Pass agent so worldDef supply chains can check/consume inputs
+      const produced = occupationProduces(agent.occupation, agent);
       if (produced) {
         addItem(s, produced.name, produced.type, produced.quantity);
         changes.push(`${agent.name} worked (purpose -0.4, wealth +${pay.toFixed(1)} ${currency}, produced ${produced.quantity} ${produced.name})`);
@@ -699,35 +665,80 @@ function getOrCreateRelationship(agent, targetName) {
 
 export { getOrCreateRelationship };
 
-// ─── Occupation Skill Map (fallback for unknown occupations) ──────
-const occupationSkillMap = {
-  farmer: 'farming', blacksmith: 'crafting', baker: 'cooking',
-  merchant: 'trading', mayor: 'leadership', healer: 'medicine',
-  herbalist: 'medicine', guard: 'combat', hunter: 'combat',
-  bard: 'art', teacher: 'science', scholar: 'science',
-  priest: 'persuasion', innkeeper: 'trading', carpenter: 'crafting',
-  tailor: 'crafting', fisherman: 'farming',
-};
+// ─── Occupation → Skill lookup (worldDef-driven, with hardcoded fallback) ──
+function getOccupationSkill(occupation) {
+  const occ = (occupation || '').toLowerCase();
+  // ★ Try worldDef first
+  if (_activeWorldDef) {
+    const occDef = _activeWorldDef.findOccupation(occ);
+    if (occDef?.skill) return occDef.skill;
+  }
+  // Fallback map for demo mode
+  const fallback = {
+    farmer: 'farming', blacksmith: 'crafting', baker: 'cooking',
+    merchant: 'trading', mayor: 'leadership', healer: 'medicine',
+    guard: 'combat', bard: 'art', teacher: 'science',
+    priest: 'persuasion', innkeeper: 'trading', carpenter: 'crafting',
+    fisherman: 'farming',
+  };
+  return fallback[occ] || null;
+}
 
 // ─── Generative Occupation Production ────────────────────────────
 // Cache of LLM-generated production for each occupation.
 // Populated by generateOccupationProduction() on first work action.
 const _occupationProductionCache = new Map();
 
-function occupationProduces(occupation) {
+// ★ Now worldDef-aware: checks worldDef occupation inputs/outputs first (supply chains)
+let _activeWorldDef = null;
+export function setSimulationWorldDef(wd) { _activeWorldDef = wd; }
+
+function occupationProduces(occupation, agent = null) {
   const occ = (occupation || '').toLowerCase();
 
-  // Check LLM-generated cache first
+  // ★ 1. Check worldDef occupations (supply chain with inputs/outputs)
+  if (_activeWorldDef) {
+    const occDef = _activeWorldDef.findOccupation(occ);
+    if (occDef && occDef.outputs.length > 0) {
+      // Check inputs — if the occupation requires inputs, the agent must have them
+      if (occDef.inputs.length > 0 && agent?.sim) {
+        for (const inp of occDef.inputs) {
+          const has = countItem(agent.sim, inp.resource) +
+            (agent.sim.inventory || []).reduce((s, i) =>
+              i.name.toLowerCase() === inp.resource ? s + i.quantity : s, 0);
+          if (has < inp.qty) {
+            // ★ SUPPLY CHAIN: can't produce without inputs — flag what's missing
+            if (!agent.sim.neededResources) agent.sim.neededResources = [];
+            const already = agent.sim.neededResources.find(r => r.resource === inp.resource);
+            if (!already) agent.sim.neededResources.push({ resource: inp.resource, qty: inp.qty, for: occ });
+            return null; // production fails
+          }
+        }
+        // Consume inputs
+        for (const inp of occDef.inputs) {
+          let remaining = inp.qty;
+          remaining -= removeItem(agent.sim, inp.resource, remaining);
+          if (remaining > 0) removeItemByName(agent.sim, inp.resource, remaining);
+        }
+      }
+      // Clear needed resources on successful production
+      if (agent?.sim) agent.sim.neededResources = [];
+      // Produce outputs
+      const out = occDef.outputs[Math.floor(Math.random() * occDef.outputs.length)];
+      return { name: out.resource, type: out.resource, quantity: out.qty || 1 };
+    }
+  }
+
+  // 2. Check LLM-generated cache
   if (_occupationProductionCache.has(occ)) {
     const items = _occupationProductionCache.get(occ);
     if (!items || items.length === 0) return null;
-    // Pick a random production from the generated options
     const pick = items[Math.floor(Math.random() * items.length)];
     if (pick.chance !== undefined && Math.random() > pick.chance) return null;
     return { name: pick.name, type: pick.type, quantity: pick.quantity || 1 };
   }
 
-  // Fallback for common occupations (used before LLM populates the cache)
+  // 3. Hardcoded fallback for common occupations
   if (/baker|bakery/.test(occ)) return { name: 'Bread', type: 'food', quantity: 1 };
   if (/blacksmith|smith/.test(occ)) return Math.random() < 0.4 ? { name: 'Simple tool', type: 'tool', quantity: 1 } : null;
   if (/farmer|farm/.test(occ)) return { name: 'Vegetables', type: 'food', quantity: 1 };
@@ -754,6 +765,264 @@ Each item: name (specific, e.g. "Fresh bread" not "food"), type (food|tool|mater
   } catch {
     _occupationProductionCache.set(occ, []); // empty = no production
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  GENERIC ACTION ENGINE — Schema-driven action execution
+//
+//  Reads action definitions from worldDef and executes them without
+//  any hardcoded switch cases.  Falls back to applyConsequence()
+//  for actions not found in worldDef.
+// ═══════════════════════════════════════════════════════════════════
+
+export function applyGenericAction(actionId, agent, target, worldDef, worldState, allAgents, actionDetails = null) {
+  if (!worldDef) return applyConsequence(actionId, agent, target, worldState, allAgents, actionDetails);
+
+  const actionDef = worldDef.findAction(actionId);
+  if (!actionDef) {
+    // Action not in worldDef — fall back to hardcoded switch
+    return applyConsequence(actionId, agent, target, worldState, allAgents, actionDetails);
+  }
+
+  const changes = [];
+  const worldChanges = [];
+  const transactions = [];
+  const s = agent.sim;
+  if (!s) return { changes, worldChanges, transactions };
+
+  const currency = worldDef.economy.currency || 'gold';
+
+  // 1. Check prerequisites
+  const canDo = worldDef.canAgentDoAction(agent, actionId);
+  if (!canDo.can) {
+    changes.push(`${agent.name} couldn't ${actionId}: ${canDo.reason}`);
+    return { changes, worldChanges, transactions };
+  }
+
+  // 2. Consume inputs from inventory
+  if (actionDef.inputs && actionDef.inputs.length > 0) {
+    for (const inp of actionDef.inputs) {
+      const rid = inp.resource.toLowerCase();
+      if (rid === 'gold' || rid === currency.toLowerCase()) {
+        // Currency deduction from wealth
+        const cost = inp.qty;
+        if (s.status.wealth < cost) {
+          changes.push(`${agent.name} can't afford ${actionId} (need ${cost} ${currency})`);
+          return { changes, worldChanges, transactions };
+        }
+        s.status.wealth -= cost;
+        transactions.push({ agentName: agent.name, amount: -cost, reason: actionId });
+      } else {
+        // Remove from inventory
+        let removed = removeItem(s, rid, inp.qty);
+        if (removed < inp.qty) removed += removeItemByName(s, rid, inp.qty - removed);
+        if (removed < inp.qty) {
+          // Try world resources
+          if (worldState?.resources?.[rid] !== undefined && worldState.resources[rid] >= (inp.qty - removed)) {
+            worldState.resources[rid] -= (inp.qty - removed);
+          } else {
+            changes.push(`${agent.name} lacks ${inp.resource} for ${actionId}`);
+            return { changes, worldChanges, transactions };
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Apply effects (need/status deltas)
+  if (actionDef.effects) {
+    for (const [field, delta] of Object.entries(actionDef.effects)) {
+      if (typeof delta !== 'number') continue;
+      // Check needs first, then status, then skills
+      if (s.needs && s.needs[field] !== undefined) {
+        s.needs[field] = clamp01(s.needs[field] + delta);
+        changes.push(`${agent.name}: ${field} ${delta > 0 ? '+' : ''}${delta.toFixed(2)}`);
+      } else if (s.status && s.status[field] !== undefined) {
+        s.status[field] = Math.max(0, Math.min(9999, s.status[field] + delta));
+        changes.push(`${agent.name}: ${field} ${delta > 0 ? '+' : ''}${typeof delta === 'number' && Math.abs(delta) < 1 ? delta.toFixed(2) : delta.toFixed(0)}`);
+      } else if (s.skills && s.skills[field] !== undefined) {
+        s.skills[field] = Math.max(0, Math.min(10, s.skills[field] + delta));
+      }
+    }
+  }
+
+  // 4. Produce outputs to inventory
+  if (actionDef.outputs && actionDef.outputs.length > 0) {
+    for (const out of actionDef.outputs) {
+      addItem(s, out.resource, out.resource, out.qty || 1);
+      changes.push(`${agent.name} received ${out.qty || 1} ${out.resource}`);
+    }
+  }
+
+  // 5. Apply world-level effects
+  if (actionDef.worldEffects && worldState) {
+    for (const [path, delta] of Object.entries(actionDef.worldEffects)) {
+      const parts = path.split('.');
+      let obj = worldState;
+      for (let i = 0; i < parts.length - 1; i++) obj = obj?.[parts[i]];
+      const key = parts[parts.length - 1];
+      if (obj && key in obj && typeof delta === 'number') {
+        obj[key] = Math.max(0, obj[key] + delta);
+        changes.push(`World ${path}: ${delta > 0 ? '+' : ''}${delta}`);
+      }
+    }
+  }
+
+  // 6. Social effects (if action targets another agent)
+  if (actionDef.social && target?.sim) {
+    const rel = getOrCreateRelationship(agent, target.name);
+    rel.familiarity = Math.min(1, rel.familiarity + 0.03);
+    rel.interactions++;
+    rel.label = getRelationshipLabel(rel);
+  }
+
+  // 6b. ★ AGENT-TO-AGENT TRADING
+  // If the action is 'trade' and there's a target agent, transfer goods between them
+  if (actionId === 'trade' && target?.sim && agent.sim.neededResources?.length > 0) {
+    for (const need of [...agent.sim.neededResources]) {
+      // Does the target have what we need?
+      const targetHas = (target.sim.inventory || []).reduce((sum, i) =>
+        (i.type === need.resource || i.name.toLowerCase() === need.resource) ? sum + i.quantity : sum, 0);
+      if (targetHas >= need.qty) {
+        // Transfer: target gives resource, agent pays gold
+        const price = worldDef.economy.prices[need.resource] || 5;
+        if (s.status.wealth >= price) {
+          removeItemByName(target.sim, need.resource, need.qty);
+          addItem(s, need.resource, need.resource, need.qty);
+          s.status.wealth -= price;
+          target.sim.status.wealth += price;
+          transactions.push({ agentName: agent.name, amount: -price, reason: `bought ${need.resource} from ${target.name}` });
+          changes.push(`${agent.name} bought ${need.qty} ${need.resource} from ${target.name} for ${price} ${currency}`);
+          agent.sim.neededResources = agent.sim.neededResources.filter(r => r.resource !== need.resource);
+        }
+      }
+    }
+  }
+
+  // 7. Skill growth from work
+  if (actionId === 'work' || actionDef.location) {
+    const occDef = worldDef.findOccupation(agent.occupation?.toLowerCase());
+    const skillKey = occDef?.skill || getOccupationSkill(agent.occupation) || null;
+    if (skillKey && s.skills[skillKey] !== undefined) {
+      s.skills[skillKey] = Math.min(10, s.skills[skillKey] + 0.02);
+    }
+  }
+
+  if (changes.length === 0) changes.push(`${agent.name} performed ${actionId}`);
+  return { changes, worldChanges, transactions };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  DYNAMIC SIMULATION TICK — worldDef-aware version
+// ═══════════════════════════════════════════════════════════════════
+
+export function dynamicNeedsTick(agent, worldDef) {
+  if (!agent.sim || !worldDef) return;
+  const s = agent.sim;
+  // Grow each need by its worldDef-defined rate
+  for (const needDef of worldDef.needs) {
+    if (s.needs[needDef.id] === undefined) continue;
+    if (isFrozen(s, `needs.${needDef.id}`)) continue;
+
+    // Apply growth rate (with trait modifiers)
+    let rate = needDef.growthRate;
+    // Special modifier: introversion slows social need
+    if (needDef.id === 'social' && s.traits.introversion > 0.6) rate *= 0.4;
+    // Special modifier: romantic trait affects romance need
+    if (needDef.id === 'romance' && s.traits.romantic > 0.5) rate *= 2;
+
+    s.needs[needDef.id] = clamp01(s.needs[needDef.id] + rate);
+
+    // Apply critical status effects (when need is very high)
+    if (needDef.statusEffects && s.needs[needDef.id] > (needDef.critical || 0.9)) {
+      for (const [statId, delta] of Object.entries(needDef.statusEffects)) {
+        if (s.status[statId] !== undefined) {
+          s.status[statId] = Math.max(0, Math.min(100, s.status[statId] + delta));
+        }
+      }
+    }
+  }
+}
+
+// ─── World Evolution Tick (called once per game-day) ─────────────
+
+export function worldEvolutionTick(worldState, worldDef, agents, gameTime) {
+  if (!worldState || !worldDef) return [];
+  const changes = [];
+
+  // ── Seasons ──
+  if (worldDef.evolution.seasons && worldDef.evolution.seasons.length > 0) {
+    const seasons = worldDef.evolution.seasons;
+    const totalDuration = seasons.reduce((s, sea) => s + (sea.duration || 7), 0);
+    const dayInCycle = (gameTime.day - 1) % totalDuration;
+    let accumulated = 0;
+    let currentSeason = seasons[0];
+    for (const sea of seasons) {
+      accumulated += (sea.duration || 7);
+      if (dayInCycle < accumulated) { currentSeason = sea; break; }
+    }
+    if (worldState._currentSeason !== currentSeason.id) {
+      worldState._currentSeason = currentSeason.id;
+      worldState._seasonProductionMod = currentSeason.productionMod ?? 1;
+      worldState._seasonNeedMods = currentSeason.needMods || {};
+      changes.push(`Season changed to ${currentSeason.id}`);
+    }
+  }
+
+  // ── Building degradation ──
+  if (worldState.buildings) {
+    for (const b of worldState.buildings) {
+      if (b.condition === undefined) b.condition = 100;
+      b.condition = Math.max(0, b.condition - 0.5);
+      if (b.condition < 20 && !b._degradeAlerted) {
+        b._degradeAlerted = true;
+        changes.push(`${b.name} is falling into disrepair (condition: ${b.condition.toFixed(0)}%)`);
+      }
+      if (b.condition > 30) b._degradeAlerted = false;
+    }
+  }
+
+  // ── Technology advancement ──
+  if (worldState.technology) {
+    // Scholars/scientists advance tech
+    for (const agent of agents) {
+      if (!agent.sim) continue;
+      const occ = (agent.occupation || '').toLowerCase();
+      if (occ.includes('scholar') || occ.includes('scientist') || occ.includes('scribe')) {
+        const field = Object.keys(worldState.technology)[Math.floor(Math.random() * Object.keys(worldState.technology).length)];
+        if (field) worldState.technology[field] = Math.min(10, worldState.technology[field] + 0.05);
+      }
+    }
+  }
+
+  // ── Cultural drift: collect shared reflections ──
+  if (!worldState.culture) worldState.culture = [];
+  const reflectionCounts = new Map();
+  for (const agent of agents) {
+    if (!agent.cognition) continue;
+    const refs = agent.cognition.memory.getByType('reflection', 10);
+    for (const r of refs) {
+      const key = r.description.replace('[Reflection] ', '').toLowerCase().substring(0, 60);
+      reflectionCounts.set(key, (reflectionCounts.get(key) || 0) + 1);
+    }
+  }
+  for (const [belief, count] of reflectionCounts) {
+    if (count >= Math.ceil(agents.length * 0.4) && !worldState.culture.includes(belief)) {
+      worldState.culture.push(belief);
+      if (worldState.culture.length > 10) worldState.culture.shift();
+      changes.push(`Cultural belief emerged: "${belief.substring(0, 50)}..."`);
+    }
+  }
+
+  // ── Population growth (simple) ──
+  const totalChildren = agents.reduce((s, a) => s + (a.sim?.children?.length || 0), 0);
+  if (totalChildren > worldState._lastChildCount) {
+    worldState.population = agents.length + totalChildren;
+    changes.push(`Population grew to ${worldState.population}`);
+  }
+  worldState._lastChildCount = totalChildren;
+
+  return changes;
 }
 
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }

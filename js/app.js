@@ -8,8 +8,10 @@ import { Input } from './input.js';
 import { UI } from './ui.js';
 import { CognitiveArchitecture } from './cognition.js';
 import { CommunityEvent, detectEventType } from './events.js';
-import { createAgentState, createWorldState, createRelationship, simulationTick, applyConsequence, getOrCreateRelationship, generateOccupationProduction } from './simulation.js';
-import { getTopGoal, getMotivationSummary, generateGoalLLM, applyConsequenceLLM, applyGenerativeConsequences } from './goals.js';
+import { createAgentState, createWorldState, createRelationship, simulationTick, applyConsequence, applyGenericAction, getOrCreateRelationship, generateOccupationProduction, setSimulationWorldDef, worldEvolutionTick } from './simulation.js';
+import { getTopGoal, getMotivationSummary, generateGoalLLM, generateGoals, applyConsequenceLLM, applyGenerativeConsequences, setGoalsWorldDef } from './goals.js';
+import { generateWorldDef, DEFAULT_WORLDDEF } from './worlddef.js';
+import { setVisualStyle } from './sprites.js';
 // AI asset generation removed — procedural sprites are cleaner
 
 class App {
@@ -18,6 +20,7 @@ class App {
     this.ui = new UI();
     this.input = new Input();
     this.world = null;
+    this.worldDef = DEFAULT_WORLDDEF;  // ★ Schema-driven world definition
     this.player = null;
     this.npcs = [];
     this.renderer = null;
@@ -176,15 +179,24 @@ class App {
         this.ui.setLoadingText('No API key found — generating demo world...');
         await this._sleep(500);
         worldData = this._getDemoWorld(desc);
+        this.worldDef = DEFAULT_WORLDDEF;
       } else {
-        // ★ Phase 1: Architect analyzes prompt → culture, landmarks, visual theme, shapes
-        this.ui.setLoadingText('Architect analyzing your world...');
+        // ★ Phase 1: Architect analyzes prompt → culture, landmarks, visual theme, shapes, AND full worldDef
+        this.ui.setLoadingText('Architect designing world systems...');
         const blueprint = await this._architectWorld(desc);
+
+        // ★ Build WorldDef from architect output
+        this.worldDef = generateWorldDef(blueprint?.worldDef || blueprint);
 
         // ★ Phase 2: World builder uses blueprint to generate full world
         this.ui.setLoadingText('Building the world from blueprint...');
         worldData = await this._generateWorldData(desc, blueprint);
       }
+
+      // ★ Set the worldDef on all subsystems
+      setSimulationWorldDef(this.worldDef);
+      setGoalsWorldDef(this.worldDef);
+      setVisualStyle(this.worldDef.visualStyle);
 
       this.ui.setLoadingText('Building the landscape...');
       await this._sleep(300);
@@ -207,17 +219,13 @@ class App {
         npc.cognition = new CognitiveArchitecture(npc, this.world);
 
         // ★ Attach simulation state
-        npc.sim = createAgentState(chars[i]);
+        npc.sim = createAgentState(chars[i], this.worldDef);
         npc.simRelationships = new Map();
 
-        // Boost skills based on occupation
-        const occSkill = {
-          farmer:'farming', blacksmith:'crafting', baker:'cooking', merchant:'trading',
-          mayor:'leadership', healer:'medicine', herbalist:'medicine', guard:'combat',
-          bard:'art', teacher:'science', priest:'persuasion', innkeeper:'trading',
-        }[chars[i].occupation?.toLowerCase()];
-        if (occSkill && npc.sim.skills[occSkill] !== undefined) {
-          npc.sim.skills[occSkill] = Math.min(10, npc.sim.skills[occSkill] + 3 + Math.random() * 2);
+        // Boost skills based on occupation (from worldDef)
+        const occDef = this.worldDef?.findOccupation(chars[i].occupation?.toLowerCase());
+        if (occDef?.skill && npc.sim.skills[occDef.skill] !== undefined) {
+          npc.sim.skills[occDef.skill] = Math.min(10, npc.sim.skills[occDef.skill] + 3 + Math.random() * 2);
         }
 
         // Seed initial relationships
@@ -235,7 +243,7 @@ class App {
       }
 
       // ★ Create world simulation state
-      this.worldSim = createWorldState(this.world.name, this.world.buildings);
+      this.worldSim = createWorldState(this.world.name, this.world.buildings, this.worldDef);
       this.worldSim.population = this.npcs.length;
       if (worldData.economy) {
         this.worldSim.economy = { ...this.worldSim.economy, ...worldData.economy };
@@ -310,79 +318,76 @@ class App {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  //  ARCHITECT LLM — Phase 1: Analyze prompt → culture, landmarks, visual theme
+  //  ARCHITECT LLM — Phase 1: Analyze prompt → culture, visual, AND full world schema
   // ═══════════════════════════════════════════════════════════════
   async _architectWorld(description) {
-    const systemPrompt = `You are a world ARCHITECT for a 2D simulation game. Your job is to analyze a user's world description and produce a BLUEPRINT — the culture, visual theme, landmark shapes, and building types needed BEFORE the world is built.
+    const systemPrompt = `You are a world ARCHITECT for a 2D simulation game. Analyze the user's description and output a COMPLETE BLUEPRINT including culture, visuals, landmarks, AND the full world schema (resources, needs, occupations, actions, traits, skills).
 
-Return JSON with this structure:
+Return JSON:
 {
-  "culture": "short culture/era identifier (e.g. 'ancient egypt', 'mughal india', 'feudal japan', 'roman empire', 'cyberpunk', 'nordic viking', 'mesoamerican', etc.)",
-  "era": "time period (e.g. 'ancient', 'medieval', 'modern', 'futuristic')",
+  "culture": "culture/era identifier",
+  "era": "ancient|medieval|modern|futuristic",
   "visual": {
     "ground": "grass|stone|sand|dirt|marble|metal|concrete|wood|tile",
     "paths": "paved|dirt|stone|wood|cobblestone|metal|gravel",
     "vegetation": "none|sparse|moderate|lush",
     "buildingStyle": "rustic|modern|futuristic|medieval|industrial|colorful|natural",
-    "culturePalette": "egyptian|indian|japanese|chinese|greek|roman|arabian|african|mesoamerican|nordic|scifi|fantasy|rustic|modern|futuristic|medieval|industrial|colorful|natural",
+    "culturePalette": "egyptian|indian|japanese|chinese|greek|roman|arabian|african|mesoamerican|nordic|scifi|fantasy|rustic|modern|medieval|industrial|colorful|natural",
     "roadLayout": "cross|radial|organic",
     "palette": {"primary": "#hex", "secondary": "#hex", "accent": "#hex"}
   },
-  "landmarks": [
-    {
-      "name": "Landmark Name",
-      "role": "what it is (e.g. pyramid, mausoleum, arena, temple, monument)",
-      "shape": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument",
-      "color": "#hex wall/body color",
-      "roofColor": "#hex roof/accent color"
-    }
-  ],
-  "suggestedBuildings": [
-    {
-      "name": "Building Name",
-      "type": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|house|tavern|shop|blacksmith|church|school|library|cafe|hospital|farm|market|townhall|bakery|inn|temple|castle|stable|fountain|palace|ziggurat|sphinx|barracks",
-      "shape": "pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument|default",
-      "landmark": true/false,
-      "color": "#hex (optional, culturally appropriate)",
-      "roofColor": "#hex (optional)"
-    }
-  ],
-  "suggestedAreas": [
-    {"name": "Area Name", "type": "forest|water|park|desert|sand|plaza|ruins|rocky|farm|swamp|garden|courtyard|indoor"}
-  ],
-  "specialShapes": [
-    {"type": "circle|ellipse|ring|polygon", "x": 32, "y": 24, "radius": 3, "fill": "#hex", "stroke": "#hex", "label": "optional label"}
-  ]
+  "landmarks": [{"name":"...", "role":"...", "shape":"pyramid|dome|obelisk|minaret|step_pyramid|pagoda|colosseum|tent|hut|tower|monument", "color":"#hex", "roofColor":"#hex"}],
+  "suggestedBuildings": [{"name":"...", "type":"...", "shape":"default|pyramid|dome|...", "landmark":false, "color":"#hex", "roofColor":"#hex"}],
+  "suggestedAreas": [{"name":"...", "type":"forest|water|park|desert|sand|plaza|ruins|rocky|farm|swamp|garden|courtyard|indoor"}],
+  "specialShapes": [],
+
+  "worldDef": {
+    "resources": [
+      {"id": "grain", "renewable": true, "baseProduction": 0.1, "unit": "bushels", "category": "consumable", "startAmount": 60},
+      {"id": "gold", "renewable": false, "unit": "coins", "category": "currency", "startAmount": 100}
+    ],
+    "needs": [
+      {"id": "hunger", "label": "Hunger", "growthRate": 0.0004, "satisfiedBy": ["bread","grain","fish"], "decayAction": "eat", "critical": 0.9},
+      {"id": "rest", "label": "Rest", "growthRate": 0.002, "decayAction": "sleep"},
+      {"id": "social", "label": "Social", "growthRate": 0.003, "decayAction": "socialize"}
+    ],
+    "traits": [{"id": "trait_name", "label": "Display Name"}],
+    "skills": [{"id": "skill_name", "label": "Display Name"}],
+    "occupations": [
+      {"id": "baker", "inputs": [{"resource": "grain", "qty": 1}], "outputs": [{"resource": "bread", "qty": 2}], "skill": "cooking", "description": "Bakes bread"}
+    ],
+    "actions": [
+      {"id": "eat", "effects": {"hunger": -0.7}, "inputs": [{"resource": "food", "qty": 1}], "description": "Eat a meal"},
+      {"id": "pray", "effects": {"purpose": -0.3, "happiness": 5}, "description": "Pray at the temple", "location": "temple"}
+    ],
+    "visualStyle": {
+      "palette": ["#hex1","#hex2","#hex3","#hex4","#hex5"],
+      "groundTexture": "grainy|smooth|organic|block",
+      "buildingMaterial": "stone_block|wood_plank|mud_brick|metal_panel",
+      "vegetationType": "deciduous|palm|pine|cactus|mushroom|bamboo",
+      "waterStyle": "still|river|ocean"
+    },
+    "economy": {"currency": "deben", "taxRate": 0.1}
+  }
 }
 
-CRITICAL RULES:
-- Infer the CULTURE and ERA from the user's description. "Ancient Egypt" → culture:"ancient egypt". "Taj Mahal" → culture:"mughal india". "Tokyo" → culture:"japanese". "Mars colony" → culture:"scifi".
-- For LANDMARKS the user mentions (Taj Mahal, pyramids, Colosseum, pagoda, etc.), add them with the correct SHAPE:
-  - Pyramids → shape:"pyramid", sandy colors
-  - Taj Mahal / domed buildings → shape:"dome", white/cream + gold
-  - Obelisks → shape:"obelisk", stone + gold cap
-  - Minarets → shape:"minaret", cream/white + gold
-  - Ziggurats → shape:"step_pyramid", earthy tones
-  - Japanese temples → shape:"pagoda", red/black
-  - Roman arena → shape:"colosseum", stone colors
-  - Nomad/desert camps → shape:"tent"
-  - African/tribal → shape:"hut"
-  - Watchtowers → shape:"tower"
-  - Statues/memorials → shape:"monument"
-- MOST buildings should use shape:"default" (normal rectangular buildings). Only landmarks and culturally iconic structures get special shapes.
-- The visual palette and ground must MATCH the culture:
-  - Egypt → ground:"sand", paths:"stone", vegetation:"sparse", culturePalette:"egyptian", roadLayout:"radial"
-  - India → ground:"stone", paths:"stone", vegetation:"moderate", culturePalette:"indian", roadLayout:"radial"
-  - Japan → ground:"grass", paths:"stone", vegetation:"lush", culturePalette:"japanese", roadLayout:"organic"
-  - Rome → ground:"stone", paths:"stone", vegetation:"moderate", culturePalette:"roman", roadLayout:"cross"
-  - Fantasy → ground:"grass", paths:"cobblestone", vegetation:"lush", culturePalette:"fantasy"
-  - Sci-fi → ground:"metal", paths:"metal", vegetation:"none", culturePalette:"scifi"
-- Generate 3-5 areas that fit the culture (e.g. "Nile Banks" for Egypt, "Cherry Blossom Garden" for Japan)
-- Generate 6-10 buildings total. 1-3 should be landmarks with special shapes. The rest are default-shaped but culturally named.
-- specialShapes is for non-building shapes like planets, force fields, magical circles. Leave empty [] if not needed.`;
+WORLD SCHEMA RULES:
+- "resources": 3-6 culturally appropriate resources. Always include a food type and a currency. Egypt: grain, gold/deben, papyrus, linen. Japan: rice, yen, silk, bamboo. Sci-fi: energy_cells, credits, alloy.
+- "needs": 5-8 needs appropriate to the world. Always include hunger, rest, social. Add culture-specific ones: "faith" for religious worlds, "honor" for samurai, "oxygen" for space, "mana" for fantasy.
+- "traits": 5-8 personality dimensions. "piety" for religious, "bushido" for Japanese, "rationality" for sci-fi.
+- "skills": 6-10 skills. Match the world: "hieroglyphics" for Egypt, "sword_fighting" for medieval, "hacking" for cyberpunk.
+- "occupations": 8-15 with inputs/outputs for supply chains. Farmer produces grain (no input). Baker needs grain → bread. Blacksmith needs ore → tools. NOT all occupations need inputs.
+- "actions": 10-20 things agents can do. Include eat, sleep, work, socialize, plus culturally specific: "pray", "meditate", "duel", "hack", "mine", "fish", etc. Each has "effects" (need/status deltas), optional "inputs"/"outputs", optional "location".
+- "visualStyle": palette of 5 hex colors matching the culture. groundTexture/buildingMaterial/vegetationType/waterStyle drive the renderer.
+- "economy": currency name matching culture, tax rate 0.05-0.15.
+
+VISUAL RULES (same as before):
+- Match culture: Egypt → sand, stone, sparse, egyptian. Japan → grass, stone, lush, japanese. Sci-fi → metal, metal, none, scifi.
+- 1-3 landmarks with special shapes. Rest are default.
+- 3-5 areas. 6-10 buildings.`;
 
     try {
-      const blueprint = await this.llm.generate(systemPrompt, description, { json: true, temperature: 0.7, maxTokens: 2048 });
+      const blueprint = await this.llm.generate(systemPrompt, description, { json: true, temperature: 0.7, maxTokens: 3500 });
       return blueprint;
     } catch (err) {
       console.warn('Architect LLM failed, using basic blueprint:', err.message);
@@ -538,7 +543,14 @@ ECONOMY (optional): If you include "economy", use currencyName appropriate to th
       this.gameTime.totalMinutes++;
       this.gameTime.minutes = this.gameTime.totalMinutes % 60;
       this.gameTime.hours = Math.floor(this.gameTime.totalMinutes / 60) % 24;
-      if (this.gameTime.hours === 0 && this.gameTime.minutes === 0) this.gameTime.day++;
+      if (this.gameTime.hours === 0 && this.gameTime.minutes === 0) {
+        this.gameTime.day++;
+        // ★ Daily world evolution tick (seasons, tech, cultural drift)
+        if (this.worldSim && this.worldDef) {
+          const evoChanges = worldEvolutionTick(this.worldSim, this.worldDef, this.npcs, this.gameTime);
+          for (const c of evoChanges) this.ui.notify(c, 'info', 5000);
+        }
+      }
       this.ui.updateGameTime(this.gameTime.hours, this.gameTime.minutes, this.gameTime.day);
     }
 
@@ -567,6 +579,9 @@ ECONOMY (optional): If you include "economy", use currencyName appropriate to th
     this.simTickTimer += dt;
     if (this.simTickTimer >= this.simTickInterval && this.worldSim) {
       this.simTickTimer = 0;
+      // ★ Sync game time to worldSim so goals/simulation can use it
+      this.worldSim.hour = this.gameTime.hours;
+      this.worldSim.day = this.gameTime.day;
       const simEvents = simulationTick(this.npcs, this.worldSim, this.gameTime);
       this._processSimEvents(simEvents);
       // ★ Update agent world awareness every tick
@@ -693,22 +708,33 @@ ECONOMY (optional): If you include "economy", use currencyName appropriate to th
         const npcList = this.npcs.map(n => `${n.name} (${n.occupation})`).join(', ');
         const resources = this.worldSim ? JSON.stringify(this.worldSim.resources) : '{}';
         const result = await this.llm.generate(
-          'You are the consequence engine for a world simulation. Given an event, output JSON describing what changes.',
+          `You are the consequence engine for a world simulation. Given an event, determine REALISTIC consequences. Output JSON.
+
+CRITICAL — understand the value semantics:
+- "safety" is a NEED (0 = feeling safe, 1 = feeling terrified). A terrorist attack INCREASES safety need (makes people feel UNSAFE), so safety delta should be POSITIVE (e.g. +0.3).
+- "happiness" is a STATUS (0 = miserable, 100 = ecstatic). A terrorist attack DECREASES happiness, so happiness delta should be NEGATIVE (e.g. -15).
+- "hunger" is a NEED (0 = full, 1 = starving). Events that destroy food INCREASE hunger (positive delta).
+- "social" is a NEED (0 = socially fulfilled, 1 = lonely). Traumatic events might increase social need (people seek comfort).
+
+Think about what REALISTICALLY happens to people during this event:
+- Disasters, attacks, plagues → safety UP (more afraid), happiness DOWN, resources DOWN
+- Festivals, celebrations → happiness UP, social DOWN (less lonely), fun DOWN
+- Economic crises → happiness DOWN, resources DOWN`,
           `Event: "${event.description}" (type: ${event.type}) at ${event.location || 'the village'}.
 NPCs: ${npcList}
 World resources: ${resources}
 
-What are the immediate consequences? Return JSON:
+Return JSON:
 {
-  "npcEffects": { "all" or "npcName": { "safety": delta, "happiness": delta, "social": delta, "hunger": delta } },
-  "resourceEffects": { "resourceName": delta },
-  "logMessage": "one-line summary of what changed",
+  "npcEffects": { "all": { "safety": +0.3, "happiness": -15 } },
+  "resourceEffects": { "resourceName": -10 },
+  "logMessage": "one-line summary",
   "severity": "minor"|"moderate"|"major"|"catastrophic"
 }
-Only include fields that actually change. Deltas are numbers (positive = increase, negative = decrease).
-For needs (safety, hunger, social): range 0-1, typical delta ±0.05 to ±0.4.
-For happiness: range 0-100, typical delta ±2 to ±15.
-For resources: typical delta ±5 to ±30.`,
+Only include fields that actually change.
+Needs deltas (safety, hunger, social): range 0-1. Positive = need INCREASES (bad). Typical: ±0.05 to ±0.4.
+Happiness delta: range 0-100. Negative = people get sadder. Typical: ±2 to ±20.
+Resource deltas: negative = destroyed/consumed. Typical: ±5 to ±30.`,
           { json: true, temperature: 0.7, maxTokens: 400 }
         );
 
@@ -1261,13 +1287,27 @@ For resources: typical delta ±5 to ±30.`,
         const algoGoal = getTopGoal(npc, this.npcs, this.worldSim);
         if (algoGoal && algoGoal.priority > 0.55) goals = [algoGoal];
       }
+      // ★ At night (22:00–06:00): merge in algorithmic sleep goal so agents actually go to sleep
+      const hour = this.gameTime.hours ?? this.worldSim?.hour;
+      if (goals && goals.length > 0 && (hour >= 22 || hour < 6)) {
+        const algoGoals = generateGoals(npc, this.npcs, this.worldSim);
+        const sleepGoals = algoGoals.filter(g => g.action === 'sleep');
+        if (sleepGoals.length > 0) {
+          goals = [...goals, ...sleepGoals].sort((a, b) => b.priority - a.priority);
+        }
+      }
 
       const goal = goals?.[0];
       if (goal && goal.priority > 0.3) {
         const isGenerative = goal._isGenerative;
+        const isNight = (hour >= 22 || hour < 6);
 
+        // ── NIGHT: If goal was socialize/seek_person, do sleep instead (no chatting at night) ──
+        if (isNight && (goal.type === 'seek_person' || goal.action === 'socialize')) {
+          applyConsequence('sleep', npc, null, this.worldSim, this.npcs);
+          npc.currentActivity = 'Sleeping — it\'s late at night';
         // ── SEEK_PERSON: Walk to a target agent and interact ──
-        if ((goal.type === 'seek_person' || goal.action === 'socialize') && goal.target) {
+        } else if ((goal.type === 'seek_person' || goal.action === 'socialize') && goal.target) {
           const inRange = npc.distanceTo(goal.target) <= CONVERSE_RANGE;
           if (inRange) {
             npc.state = 'talking';
@@ -1816,10 +1856,19 @@ What state changes result from this conversation?`,
       });
       if (isDupe) return;
     } else {
-      // For generic topics: only dedup same pair within 30 seconds (much shorter window)
+      // For generic topics: dedup same pair within 30 seconds
+      // ★ For 'seeking' specifically: also dedup by initiator — one seeking entry per agent per 45s
+      const seekWindow = convData.topic === 'seeking' ? 45000 : 30000;
       const isDupe = this.conversationFeed.some(c => {
         const cPair = [c.speaker1, c.speaker2].sort().join('+');
-        return cPair === pair && (Date.now() - c.timestamp) < 30000;
+        if (cPair === pair && (Date.now() - c.timestamp) < seekWindow) return true;
+        // Same initiator (e.g. 🚶 Kito) seeking anyone — throttle agent-level seeking spam
+        if (convData.topic === 'seeking' && c.topic === 'seeking') {
+          const init = (convData.speaker1 || '').replace(/^🚶\s*/, '').trim();
+          const cInit = (c.speaker1 || '').replace(/^🚶\s*/, '').trim();
+          if (init && init === cInit && (Date.now() - c.timestamp) < 45000) return true;
+        }
+        return false;
       });
       if (isDupe) return;
     }
@@ -2283,15 +2332,18 @@ Answer the research question based on the simulation data above. Be analytical a
   _gatherResearchContext(query) {
     const q = query.toLowerCase();
     const sections = [];
+    const fmt = (v, d = 0) => (typeof v === 'number' ? v.toFixed(d) : v ?? '?');
 
     // ── Always include: world overview ──
     if (this.worldSim) {
       const ws = this.worldSim;
+      const res = ws.resources || {};
+      const resStr = Object.entries(res).map(([k, v]) => `${k}: ${fmt(v, 0)}`).join(', ') || 'none';
       sections.push(`WORLD STATE:
 - Name: ${this.world?.name}, Day ${this.gameTime.day}, ${this.gameTime.hours}:${String(this.gameTime.minutes).padStart(2, '0')}
-- Food: ${ws.resources.food.toFixed(0)}, Gold: ${ws.resources.gold.toFixed(0)}, Wood: ${ws.resources.wood.toFixed(0)}, Stone: ${ws.resources.stone.toFixed(0)}
-- Leader: ${ws.governance.leader || 'None'}, Unrest: ${ws.governance.unrest.toFixed(1)}%, Prosperity: ${ws.economy.prosperity.toFixed(1)}
-- Population: ${ws.population}, Treasury: ${(ws.economy.treasury || 0).toFixed(0)}`);
+- Resources: ${resStr}
+- Leader: ${ws.governance?.leader || 'None'}, Unrest: ${fmt(ws.governance?.unrest, 1)}%, Prosperity: ${fmt(ws.economy?.prosperity, 1)}
+- Population: ${ws.population ?? '?'}, Treasury: ${fmt(ws.economy?.treasury, 0)}`);
     }
 
     // ── Detect which agents the query is about ──
@@ -2326,7 +2378,7 @@ Answer the research question based on the simulation data above. Be analytical a
           parts.push(`Daily plan: ${npc.cognition.dailyPlan.map(p => p.activity || p).join(' → ')}`);
         }
         if (npc.sim) {
-          const urgentNeeds = Object.entries(npc.sim.needs).filter(([,v]) => v > 0.6).map(([k,v]) => `${k}:${v.toFixed(2)}`);
+          const urgentNeeds = Object.entries(npc.sim.needs || {}).filter(([,v]) => typeof v === 'number' && v > 0.6).map(([k,v]) => `${k}:${fmt(v, 2)}`);
           if (urgentNeeds.length) parts.push(`Urgent needs: ${urgentNeeds.join(', ')}`);
         }
         if (parts.length > 0) {
@@ -2342,7 +2394,8 @@ Answer the research question based on the simulation data above. Be analytical a
         if (!npc.simRelationships || npc.simRelationships.size === 0) continue;
         const rels = [];
         for (const [name, rel] of npc.simRelationships) {
-          rels.push(`  ${name}: ${rel.label} (trust:${rel.trust.toFixed(2)}, attraction:${rel.attraction.toFixed(2)}, respect:${rel.respect.toFixed(2)}, rivalry:${rel.rivalry.toFixed(2)}, interactions:${rel.interactions})`);
+          const r = rel || {};
+          rels.push(`  ${name}: ${r.label || '?'} (trust:${fmt(r.trust, 2)}, attraction:${fmt(r.attraction, 2)}, respect:${fmt(r.respect, 2)}, rivalry:${fmt(r.rivalry, 2)}, interactions:${r.interactions ?? '?'})`);
         }
         if (npc.cognition?.relationshipHistory?.length > 0) {
           const evolutions = npc.cognition.relationshipHistory.map(h =>
@@ -2403,7 +2456,7 @@ Answer the research question based on the simulation data above. Be analytical a
         const topics = npc.cognition.hotTopics;
         if (topics.length === 0) continue;
         const topicStr = topics.map(t =>
-          `  - "${t.topic.substring(0, 80)}" (from: ${t.source}, spread to: ${t.spreadTo.size} people)`
+          `  - "${(t.topic || '').substring(0, 80)}" (from: ${t.source || '?'}, spread to: ${Array.isArray(t.spreadTo) ? t.spreadTo.length : 0} people)`
         ).join('\n');
         sections.push(`GOSSIP OF ${npc.name.toUpperCase()}:\n${topicStr}`);
       }
@@ -2417,11 +2470,12 @@ Answer the research question based on the simulation data above. Be analytical a
         const parts = [`${npc.name} (${npc.occupation})`];
         if (npc.currentActivity) parts.push(`doing: ${npc.currentActivity}`);
         if (npc.sim) {
-          if (npc.sim.partner) parts.push(`partner: ${npc.sim.partner}`);
-          parts.push(`happiness: ${npc.sim.status.happiness.toFixed(0)}`);
-          parts.push(`wealth: ${npc.sim.status.wealth.toFixed(0)}`);
-          const topNeed = Object.entries(npc.sim.needs).sort((a,b) => b[1] - a[1])[0];
-          if (topNeed && topNeed[1] > 0.5) parts.push(`urgent need: ${topNeed[0]}(${topNeed[1].toFixed(2)})`);
+          const s = npc.sim, st = s.status || {}, nd = s.needs || {};
+          if (s.partner) parts.push(`partner: ${s.partner}`);
+          parts.push(`happiness: ${fmt(st.happiness, 0)}`);
+          parts.push(`wealth: ${fmt(st.wealth, 0)}`);
+          const topNeed = Object.entries(nd).sort((a,b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
+          if (topNeed && typeof topNeed[1] === 'number' && topNeed[1] > 0.5) parts.push(`urgent need: ${topNeed[0]}(${fmt(topNeed[1], 2)})`);
         }
         if (npc.cognition) {
           parts.push(`memories: ${npc.cognition.memory.count()}`);
@@ -2598,39 +2652,51 @@ ${(data.relationshipNetwork?.edges || []).map(e =>
     this.ui.notify('Processing command...', 'info', 2000);
 
     try {
+      // ★ Build available actions list from worldDef
+      const wdActions = this.worldDef ? this.worldDef.actions.map(a => `"${a.id}": ${a.description}`).join('\n  ') : '';
+      const wdResources = this.worldDef ? Object.keys(this.worldSim?.resources || {}).join(', ') : 'food, gold, wood, stone';
+
       const systemPrompt = `You are a world modification engine for a 2D pixel world called "${this.world.name}".
 
-The world has these buildings: ${this.world.buildings.map(b => `${b.name} (${b.type})`).join(', ')}
+Buildings: ${this.world.buildings.map(b => `${b.name} (${b.type})`).join(', ')}
 Characters: ${this.npcs.map(n => `${n.name} (${n.occupation})`).join(', ')}
 Active events: ${this.worldEvents.map(e => e.description).join(', ') || 'none'}
+Resources: ${wdResources}
 
 The user wants to modify the world. Interpret their request and respond with JSON:
 {
-  "action": "add_building" | "add_character" | "modify_terrain" | "add_decoration" | "event_fire" | "event_rain" | "event_magic" | "world_event" | "announce" | "npc_action" | "stop_event",
+  "action": "agent_action" | "add_building" | "add_character" | "modify_terrain" | "event_fire" | "event_rain" | "event_magic" | "world_event" | "announce" | "npc_action" | "stop_event" | "custom",
   "details": {
     "name": "optional name",
     "type": "building/terrain/event type",
     "target": "building name or NPC name if relevant",
+    "actionId": "action ID from world schema if using agent_action",
     "message": "announcement text if relevant",
     "description": "what is happening",
-    "severity": "minor" | "moderate" | "major" | "catastrophic",
+    "severity": "minor|moderate|major|catastrophic",
     "duration": 30000
   },
   "response": "Brief description of what happened (shown to player)"
 }
 
-ACTION SELECTION RULES:
-- "event_fire": fire, burning, explosion at a specific building
-- "event_rain": rain, storm, flooding
-- "event_magic": magic, sparkle, supernatural glow
-- "world_event": ANY major event that affects the whole village — earthquake, plague, drought, famine, invasion, economic crisis, natural disaster, miracle, discovery, war, rebellion, etc. This is the DEFAULT for dramatic events that should impact everyone. Set severity and a clear description.
-- "announce": minor announcements or news that don't change the world state
-- "npc_action": make a specific NPC do something (say/go_to/follow)
+ACTION TYPES:
+- "agent_action": Make a CHARACTER perform a world action. Set details.target to the NPC name, details.actionId to one of the available actions below.
+- "world_event": ANY dramatic event affecting the whole village (earthquake, plague, invasion, economic crisis, etc.)
+- "event_fire"/"event_rain"/"event_magic": specific visual events
+- "npc_action": make an NPC say/go_to/follow (details.type = "say"|"go_to"|"follow")
 - "add_building"/"add_character"/"modify_terrain": physical world changes
+- "announce": minor announcements only
+- "custom": anything not covered above — describe the desired effect in details.description
 
-IMPORTANT: Use "world_event" for ANY dramatic event (earthquake, plague, invasion, economic collapse, etc.) — NOT "announce". "announce" is only for minor news. "world_event" actually changes the simulation state and makes NPCs react.
-For "event_fire", set details.target to the building name that should burn.
-For "npc_action", set details.target to the NPC name and details.type to "say"|"go_to"|"follow".`;
+AVAILABLE WORLD ACTIONS (for agent_action):
+  ${wdActions}
+
+RULES:
+- If the user says "Elena opens a shop" → agent_action, target:"Elena", actionId:"open_business"
+- If the user says "earthquake" → world_event with severity and description
+- If the user says something not in the action list → "custom" with a clear description
+- Use "world_event" for dramatic events, NOT "announce"
+For "event_fire", set details.target to the building name.`;
 
       const result = await this.llm.generate(systemPrompt, text, { json: true, temperature: 0.7, maxTokens: 512 });
       this._applyCommand(result);
@@ -2765,6 +2831,55 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
     const { action, details } = result;
 
     switch (action) {
+      // ★ Agent performs a worldDef action (e.g. "Elena opens a shop")
+      case 'agent_action': {
+        const targetNpc = details.target
+          ? this.npcs.find(n => n.name.toLowerCase().includes((details.target || '').toLowerCase()))
+          : null;
+        if (!targetNpc) { this.ui.notify('NPC not found', 'error'); break; }
+        const actionId = details.actionId || details.type;
+        if (!actionId) { this.ui.notify('No action specified', 'error'); break; }
+
+        const actionResult = applyGenericAction(actionId, targetNpc, null, this.worldDef, this.worldSim, this.npcs, details);
+        for (const c of actionResult.changes || []) this.ui.notify(c, 'info', 4000);
+
+        // Add to feed
+        this._addToConversationFeed({
+          speaker1: targetNpc.name, speaker2: '',
+          lines: [{ speaker: targetNpc.name, text: details.description || `Performed ${actionId}` }],
+          stateChanges: (actionResult.changes || []).map(c => this._formatStateChange(c)),
+          topic: 'action', location: '',
+          gameTime: `${this.gameTime.hours}:${String(this.gameTime.minutes).padStart(2, '0')}`,
+        });
+
+        // NPC says something about it
+        targetNpc.say(details.description || `I just ${actionId}!`, 4000);
+        if (targetNpc.cognition) {
+          targetNpc.cognition.memory.add(`I ${details.description || actionId}.`, 'event', 6, this.gameTime);
+        }
+        break;
+      }
+
+      // ★ Custom action — LLM determines consequences
+      case 'custom': {
+        const desc = details.description || details.message || 'Something happened';
+        // Treat as a world event with LLM-driven consequences
+        this.addWorldEvent('custom', this.player.x, this.player.y, {
+          location: this.world.name,
+          description: desc,
+          duration: details.duration || 15000,
+          severity: details.severity || 'moderate',
+        });
+        // Inject into all NPC cognition
+        for (const npc of this.npcs) {
+          if (npc.cognition) {
+            npc.cognition.memory.add(`[EVENT] ${desc}`, 'event', 6, this.gameTime);
+            npc.cognition.addHotTopic(desc, 'world event', 6, this.gameTime);
+          }
+        }
+        break;
+      }
+
       case 'event_fire': {
         const building = this.world.buildings.find(b =>
           b.name.toLowerCase().includes((details.target || '').toLowerCase())
@@ -2877,15 +2992,77 @@ Reply: {"name":"Event Name","phases":[{"id":"announce","label":"...","duration":
 
       case 'add_character': {
         const spawn = this.world.randomWalkable(this.player.x, this.player.y, 5);
-        const npc = new NPC(spawn.x, spawn.y, {
+        const charData = {
           id: `npc_${this.npcs.length}`,
           name: details.name || 'New Character',
           age: details.age || 25,
-          occupation: details.type || 'Wanderer',
-          personality: details.description || 'Friendly and curious',
-        });
+          occupation: details.type || details.occupation || 'Wanderer',
+          personality: details.description || details.personality || 'Friendly and curious',
+          home: details.home || null,
+          appearance: details.appearance || {},
+          relationships: {},
+        };
+        const npc = new NPC(spawn.x, spawn.y, charData);
+
+        // ★ Attach full cognitive architecture (so they can think, plan, converse)
+        npc.cognition = new CognitiveArchitecture(npc, this.world);
+
+        // ★ Attach simulation state (needs, traits, skills, status)
+        npc.sim = createAgentState(charData, this.worldDef);
+        npc.simRelationships = new Map();
+
+        // ★ Boost skills based on occupation (from worldDef, not hardcoded)
+        const occDef = this.worldDef?.findOccupation(charData.occupation?.toLowerCase());
+        const occSkill = occDef?.skill;
+        if (occSkill && npc.sim.skills[occSkill] !== undefined) {
+          npc.sim.skills[occSkill] = Math.min(10, npc.sim.skills[occSkill] + 3 + Math.random() * 2);
+        }
+
         this.npcs.push(npc);
-        npc.say(`Hello! I just arrived!`, 5000);
+
+        // ★ Update world population
+        if (this.worldSim) this.worldSim.population = this.npcs.length;
+
+        // ★ Add to agent selector in Agents tab
+        const select = document.getElementById('state-agent-select');
+        if (select) {
+          const opt = document.createElement('option');
+          opt.value = npc.id;
+          opt.textContent = `${npc.name} (${npc.occupation})`;
+          select.appendChild(opt);
+        }
+
+        // ★ Everyone learns about the new arrival
+        for (const other of this.npcs) {
+          if (other === npc) continue;
+          if (other.cognition) {
+            other.cognition.memory.add(`A newcomer arrived: ${npc.name}, a ${npc.occupation}.`, 'event', 6, this.gameTime);
+            other.cognition.addHotTopic(`${npc.name} the ${npc.occupation} just arrived in the village`, 'new arrival', 6, this.gameTime);
+          }
+          if (other.sim) {
+            other.sim.knowledge.add(`${npc.name} is a new ${npc.occupation} in the village`);
+          }
+        }
+
+        // ★ New NPC gets basic knowledge of the world
+        npc.sim.knowledge.add(`I just arrived in ${this.world.name}`);
+        for (const b of this.world.buildings) {
+          npc.sim.knowledge.add(`There is a ${b.type} called ${b.name}`);
+        }
+        if (npc.cognition) {
+          npc.cognition.memory.add(`I just arrived in ${this.world.name}. Everything is new to me.`, 'event', 7, this.gameTime);
+        }
+
+        npc.say(`Hello everyone! I'm ${npc.name}, I just arrived!`, 5000);
+
+        // ★ Post to feed
+        this._addToConversationFeed({
+          speaker1: 'World', speaker2: '',
+          lines: [{ speaker: 'World', text: `${npc.name} the ${npc.occupation} has arrived in the village!` }],
+          topic: 'new arrival', location: this.world.name,
+          gameTime: `${this.gameTime.hours}:${String(this.gameTime.minutes).padStart(2, '0')}`,
+        });
+
         break;
       }
 

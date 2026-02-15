@@ -114,9 +114,11 @@ export class EnvironmentTree {
     }
 
     // Add buildings with rooms and objects
+    // ★ Check worldDef building types for rooms first, then fall back to hardcoded templates
     for (const building of buildings) {
       const bNode = this.root.addChild(building.name, 'building');
-      const rooms = BUILDING_ROOM_TEMPLATES[building.type] || BUILDING_ROOM_TEMPLATES.house;
+      const wdRooms = building._worldDefRooms;  // set by world.js from worldDef.buildingTypes
+      const rooms = wdRooms || BUILDING_ROOM_TEMPLATES[building.type] || BUILDING_ROOM_TEMPLATES.house;
 
       for (const roomName of rooms) {
         const rNode = bNode.addChild(roomName, 'room');

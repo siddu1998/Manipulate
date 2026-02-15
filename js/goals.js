@@ -12,16 +12,87 @@
 // ═══════════════════════════════════════════════════════════════════
 
 import { getRelationshipLabel, getOrCreateRelationship, countItem } from './simulation.js';
+import { DEFAULT_WORLDDEF } from './worlddef.js';
+
+// ★ Active worldDef for goal generation (set by app.js)
+let _goalsWorldDef = null;
+export function setGoalsWorldDef(wd) { _goalsWorldDef = wd; }
 
 // ─── Generate goals from current agent state ──────────────────────
 export function generateGoals(agent, allAgents, worldState) {
   if (!agent.sim) return [];
   const s = agent.sim;
   const t = s.traits;
+  const wd = _goalsWorldDef || DEFAULT_WORLDDEF;
   const goals = [];
+  const hour = worldState?.hour ?? new Date().getHours();
 
-  // ── SURVIVAL NEEDS ──
-  if (s.needs.hunger > 0.6) {
+  // ★ TIME-AWARE BEHAVIOR — agents should sleep at night and work during day
+  if (hour >= 22 || hour < 6) {
+    // Nighttime: strong push toward sleeping
+    goals.push({
+      type: 'sleep', priority: 0.8 + (s.needs.rest || 0) * 0.5,
+      action: 'sleep',
+      description: `${agent.name} should rest — it's late at night`,
+    });
+  } else if (hour >= 7 && hour < 12) {
+    // Morning: work time
+    goals.push({
+      type: 'work', priority: 0.4 + (s.needs.purpose || 0) * 0.6,
+      action: 'work',
+      description: `${agent.name} starts the work day`,
+    });
+  } else if (hour >= 17 && hour < 21) {
+    // Evening: social time
+    const nearby = allAgents.filter(a => a.name !== agent.name && agent.distanceTo?.(a) < 15);
+    if (nearby.length > 0) {
+      goals.push({
+        type: 'socialize', priority: 0.5 + (s.needs.social || 0) * 0.5,
+        action: 'socialize', target: nearby[Math.floor(Math.random() * nearby.length)],
+        description: `${agent.name} wants to socialize in the evening`,
+      });
+    }
+  }
+
+  // ★ DYNAMIC NEED-BASED GOALS from worldDef
+  // Iterate all worldDef-defined needs and generate goals when they cross threshold
+  for (const needDef of wd.needs) {
+    const val = s.needs[needDef.id];
+    if (val === undefined) continue;
+    const threshold = needDef.threshold ?? 0.7;
+    if (val > threshold && needDef.decayAction) {
+      const actionDef = wd.findAction(needDef.decayAction);
+      goals.push({
+        type: needDef.decayAction,
+        priority: val * 1.5,
+        action: needDef.decayAction,
+        description: `${agent.name} needs to ${actionDef?.description || needDef.decayAction} (${needDef.label}: ${val.toFixed(2)})`,
+        target: actionDef?.social ? allAgents.find(a => a.name !== agent.name && agent.distanceTo?.(a) < 12) : null,
+      });
+    }
+  }
+
+  // ★ SUPPLY CHAIN GOALS — agent needs materials for their occupation
+  if (s.neededResources && s.neededResources.length > 0) {
+    for (const need of s.neededResources) {
+      // Try to find a producer or market
+      const chain = wd.getSupplyChain(need.resource);
+      const producer = chain.producers.length > 0
+        ? allAgents.find(a => a.name !== agent.name && chain.producers.some(p => a.occupation?.toLowerCase().includes(p.id)))
+        : null;
+      goals.push({
+        type: producer ? 'seek_person' : 'go_to_building',
+        priority: 0.65,
+        action: 'trade',
+        target: producer || null,
+        targetBuilding: producer ? null : 'market',
+        description: `${agent.name} needs ${need.qty} ${need.resource} for ${need.for} work`,
+      });
+    }
+  }
+
+  // ── SURVIVAL NEEDS (hardcoded fallback — only fires if worldDef goals didn't cover it) ──
+  if (s.needs.hunger > 0.6 && !goals.some(g => g.action === 'eat')) {
     goals.push({
       type: 'eat',
       priority: s.needs.hunger * 2,  // urgent when hungry
@@ -314,9 +385,18 @@ export async function generateGoalLLM(agent, allAgents, worldState, llm) {
     .map(a => `${a.name} (${a.occupation})`)
     .join(', ') || 'nobody nearby';
 
-  // World context
+  // World context — ★ now includes worldDef resources dynamically
   const ws = worldState;
-  const worldStr = `Food: ${ws.resources.food.toFixed(0)}, Gold: ${ws.resources.gold.toFixed(0)}, Leader: ${ws.governance.leader || 'none'}, Unrest: ${ws.governance.unrest.toFixed(0)}, Prosperity: ${ws.economy.prosperity.toFixed(0)}, Day: ${ws.day}`;
+  const wd = _goalsWorldDef || DEFAULT_WORLDDEF;
+  const resourceStr = Object.entries(ws.resources || {}).map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toFixed(0) : v}`).join(', ');
+  const hour = ws.hour ?? new Date().getHours();
+  const worldStr = `Resources: ${resourceStr}. Leader: ${ws.governance?.leader || 'none'}, Unrest: ${ws.governance?.unrest?.toFixed(0) || 0}, Prosperity: ${ws.economy?.prosperity?.toFixed(0) || 50}, Day: ${ws.day || 1}, CURRENT TIME: ${hour}:00 (24h)`;
+
+  // ★ Available actions from worldDef
+  const actionsStr = wd.actions.slice(0, 20).map(a => `"${a.id}": ${a.description}`).join('\n  ');
+
+  // ★ Supply chain needs
+  const supplyNeeds = (s.neededResources || []).map(n => `Needs ${n.qty} ${n.resource} to do ${n.for} work`).join('; ');
 
   try {
     const result = await llm.generate(
@@ -329,17 +409,22 @@ GOAL TYPES (how the goal translates to physical behavior):
 - "call_event": Organize a community event (any type — wedding, funeral, meeting, festival, protest, etc.)
 - "wander": Walk around exploring or doing something while moving
 
+AVAILABLE ACTIONS in this world:
+  ${actionsStr}
+
 RULES:
 - Goals should emerge from the agent's personality, needs, relationships, memories, and world state
+- TIME OF DAY: Check CURRENT TIME in WORLD. Between 22:00 and 06:00 it is night — villagers are asleep. During night hours you MUST prefer "stay_here" with action "sleep" (rest at home). Do NOT suggest seek_person, socialize, go_to_building, call_event, or wander at night unless there is an emergency.
 - Be creative — agents are people. They have complex motivations beyond survival
 - High-urgency needs (>0.7) should usually be addressed first, but personality matters
 - An ambitious agent might ignore hunger to pursue power. A romantic might skip work to flirt.
 - Consider their relationships: they might want to help a friend, confront a rival, or propose to a lover
 - Consider their memories: recent events should influence what they want
-- Any goal is valid. "Warn village about food shortage", "Apologize to someone I wronged", "Organize a wedding", "Paint a mural", "Challenge someone to a duel"
+- If the agent needs materials for work (supply chain), they should seek out producers or markets
+- Any goal is valid. "Warn village about food shortage", "Trade goods at the market", "Organize a wedding", "Paint a mural", "Challenge someone to a duel"
 
 OUTPUT (JSON):
-{"goals":[{"description":"what they want to do and why","priority":0.0-1.0,"type":"seek_person|stay_here|go_to_building|call_event|wander","target":"AgentName or BuildingName if relevant","event_details":{"type":"event type if call_event","topic":"description"}}]}`,
+{"goals":[{"description":"what they want to do and why","priority":0.0-1.0,"type":"seek_person|stay_here|go_to_building|call_event|wander","target":"AgentName or BuildingName if relevant","action":"action_id from available actions","event_details":{"type":"event type if call_event","topic":"description"}}]}`,
 
       `AGENT: ${agent.name} (${agent.occupation}, ${s.lifeStage})
 PERSONALITY: ${agent.personality || 'unknown'}
@@ -349,7 +434,7 @@ STATUS: ${statusStr}
 SKILLS: ${skillsStr || 'none notable'}
 PARTNER: ${s.partner || 'none'}
 CHILDREN: ${s.children.length}
-INVENTORY: ${invStr}
+INVENTORY: ${invStr}${supplyNeeds ? `\nSUPPLY NEEDS: ${supplyNeeds}` : ''}
 RELATIONSHIPS: ${relStr.join('; ') || 'no close relationships yet'}
 RECENT MEMORIES: ${recentMemories.join(' | ') || 'none'}
 NEARBY: ${nearbyStr}
@@ -366,7 +451,7 @@ What does ${agent.name} want to do right now?`,
     return result.goals.map(g => ({
       type: g.type || 'stay_here',
       priority: Math.max(0, Math.min(1, g.priority || 0.5)),
-      action: g.type || 'stay_here',
+      action: g.action || g.type || 'stay_here',
       target: g.target ? allAgents.find(a =>
         a.name === g.target || a.name.toLowerCase().includes((g.target || '').toLowerCase())
       ) : null,

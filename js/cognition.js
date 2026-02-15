@@ -232,25 +232,20 @@ Each memory should be 1 sentence, personal, and specific.
       if (s.partner) summary += `Partner: ${s.partner}\n`;
       if (s.children.length > 0) summary += `Children: ${s.children.length}\n`;
 
-      // Human-readable feelings (derived from numbers above)
-      // ★ Hunger/rest deliberately excluded — the raw need numbers are already in the summary.
-      //   Including "hungry"/"tired" as words causes the LLM to obsess over food/sleep.
-      //   Only truly extreme states (starving at 0.95) get a feeling word.
+      // ★ Dynamic feelings — derived from worldDef needs (not hardcoded need names)
+      // Only extreme states generate feeling words to avoid LLM obsessing over one topic
       const feelings = [];
-      if (s.needs.hunger > 0.95) feelings.push('starving');
-      if (s.needs.rest > 0.9) feelings.push('exhausted');
-      if (s.needs.social > 0.7) feelings.push('lonely');
-      if (s.needs.fun > 0.7) feelings.push('bored');
-      if (s.needs.romance > 0.6) feelings.push('longing for connection');
-      if (s.needs.safety > 0.5) feelings.push('anxious about safety');
+      for (const [needId, val] of Object.entries(s.needs)) {
+        if (val > 0.9) feelings.push(`desperate for ${needId}`);
+        else if (val > 0.75 && needId !== 'hunger' && needId !== 'rest') feelings.push(`${needId} need is high`);
+      }
+      // Status-derived feelings (these are universal regardless of worldDef)
       if (s.status.health < 40) feelings.push('feeling unwell');
       if (s.status.happiness < 25) feelings.push('unhappy');
+      else if (s.status.happiness > 85) feelings.push('feeling great');
       else if (s.status.happiness > 70) feelings.push('in good spirits');
       if (s.status.energy < 25) feelings.push('low energy');
       if (s.status.wealth < 10) feelings.push('almost broke');
-      // ★ Add positive/interesting feelings so conversations aren't always about problems
-      if (s.status.happiness > 85) feelings.push('feeling great');
-      if (s.needs.purpose < 0.2) feelings.push('fulfilled');
       if (s.status.reputation > 70) feelings.push('confident');
       if (feelings.length > 0) {
         summary += `Current feelings: ${feelings.join(', ')}\n`;
@@ -1038,13 +1033,15 @@ Regenerate the rest of ${this.npc.name}'s day from NOW until 22:00. Account for 
       relDesc = `${speaker.name} barely knows ${listener.name}.`;
     }
 
-    // ★ LISTENER CONTEXT — what the speaker can observe about the listener
+    // ★ LISTENER CONTEXT — what the speaker can observe (worldDef-driven, not hardcoded)
     let listenerContext = `${listener.name} (${listener.occupation})`;
     if (listener.sim) {
       const ls = listener.sim;
       const lFeelings = [];
-      if (ls.needs.hunger > 0.88) lFeelings.push('looks hungry');
-      if (ls.needs.rest > 0.7) lFeelings.push('looks tired');
+      // Dynamic: check all needs at critical threshold
+      for (const [needId, val] of Object.entries(ls.needs)) {
+        if (val > 0.85) lFeelings.push(`looks ${needId === 'rest' ? 'tired' : needId === 'hunger' ? 'hungry' : 'stressed about ' + needId}`);
+      }
       if (ls.status.happiness < 30) lFeelings.push('seems unhappy');
       else if (ls.status.happiness > 75) lFeelings.push('seems cheerful');
       if (ls.partner) listenerContext += `, partner: ${ls.partner}`;

@@ -76,14 +76,15 @@ export class MemoryStream {
 
   // ─── Async embedding processing ─────────────────────────────────
   // Call this periodically from the app with the LLM instance
+  // ★ Now batches more aggressively (up to 50) for faster processing
   async processEmbeddingQueue(llm) {
     if (this._embeddingInProgress || this._embeddingQueue.length === 0) return;
     if (!llm || !llm.canEmbed()) return;
 
     this._embeddingInProgress = true;
     try {
-      // Process up to 20 at a time
-      const batch = this._embeddingQueue.splice(0, 20);
+      // ★ Process up to 50 at a time (was 20)
+      const batch = this._embeddingQueue.splice(0, 50);
       const texts = batch.map(e => e.description);
       const embeddings = await llm.embedBatch(texts);
       for (let i = 0; i < batch.length; i++) {
@@ -93,6 +94,17 @@ export class MemoryStream {
       console.warn('Embedding batch failed:', err.message);
     }
     this._embeddingInProgress = false;
+  }
+
+  // ★ Semantic search: generate query embedding, then retrieve using cosine similarity
+  async semanticSearch(query, llm, count = 10) {
+    if (!llm?.canEmbed()) return this.retrieve(query, count);
+    try {
+      const queryEmbedding = await llm.embed(query);
+      return this.retrieve(query, count, queryEmbedding);
+    } catch {
+      return this.retrieve(query, count);
+    }
   }
 
   // ─── Core Retrieval (paper Section 4.1) ─────────────────────────
@@ -240,7 +252,8 @@ function minMaxNormalize(values) {
 // ═══════════════════════════════════════════════════════════════════
 
 export class ReflectionSystem {
-  constructor(threshold = 100) {
+  constructor(threshold = 75) {
+    // ★ Lowered from 100 to 75 so reflections happen more often
     this.threshold = threshold;
     this.lastReflectionTime = Date.now();
   }

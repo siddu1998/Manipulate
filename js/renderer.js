@@ -1,6 +1,6 @@
 // ─── Canvas Renderer ──────────────────────────────────────────────
 import { TILE_SIZE, WORLD_COLS, WORLD_ROWS } from './config.js';
-import { getTileSprite } from './sprites.js';
+import { getTileSprite, getVisualStyle } from './sprites.js';
 
 export class Renderer {
   constructor(canvas) {
@@ -347,6 +347,33 @@ export class Renderer {
     const wallH = ph - roofH;
     ctx.fillStyle = b.color;
     ctx.fillRect(px, wallY, pw, wallH);
+
+    // ★ Building material texture from worldDef
+    const material = getVisualStyle()?.buildingMaterial || 'wood_plank';
+    if (material === 'stone_block' || material === 'mud_brick') {
+      // Block/brick lines
+      ctx.fillStyle = this._adj(b.color, -12);
+      for (let by = wallY; by < wallY + wallH; by += 8) {
+        const offset = ((by / 8) | 0) % 2 === 0 ? 0 : 4;
+        for (let bx = px + offset; bx < px + pw; bx += 8) {
+          ctx.fillRect(bx, by, 8, 1);
+          ctx.fillRect(bx, by, 1, 8);
+        }
+      }
+    } else if (material === 'metal_panel') {
+      ctx.fillStyle = this._adj(b.color, -8);
+      for (let by = wallY + 4; by < wallY + wallH; by += 12) {
+        ctx.fillRect(px, by, pw, 1);
+      }
+      ctx.fillRect(px + (pw >> 1), wallY, 1, wallH);
+    } else {
+      // wood_plank or default — horizontal lines
+      ctx.fillStyle = this._adj(b.color, -10);
+      for (let by = wallY + 6; by < wallY + wallH; by += 7) {
+        ctx.fillRect(px + 2, by, pw - 4, 1);
+      }
+    }
+
     // Border
     ctx.fillStyle = this._adj(b.color, -20);
     ctx.fillRect(px, wallY, pw, 2);

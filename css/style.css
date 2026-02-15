@@ -1054,7 +1054,7 @@ kbd {
   margin: 0 6px 0 0;
   vertical-align: middle;
 }
-#tab-research {
+#tab-research.active {
   display: flex;
   flex-direction: column;
 }
